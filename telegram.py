@@ -39,10 +39,21 @@ def send_file(file_path: str, caption: str = "") -> bool:
 
 
 def notify_start(agent_name: str, project_path: str, model: str, mcp_servers: list[str] = None, tools_count: int = 0, skills_count: int = 0):
-    mcp_list = ""
-    if mcp_servers:
-        mcp_list = "\n\n🔌 MCP:\n" + "\n".join(f"  • {s}" for s in mcp_servers)
-    send(f"🚀 <b>{agent_name}</b> started\n\n📁 <code>{project_path}</code>\n🧠 {model}\n🔧 Tools: {tools_count} | Skills: {skills_count}{mcp_list}")
+    mcp_list = "\n".join(f"  • {s}" for s in mcp_servers) if mcp_servers else "none"
+    db = config.DATABASE_URL.split("@")[-1] if config.DATABASE_URL and "@" in config.DATABASE_URL else (config.DATABASE_URL or "disabled")
+    refs = ", ".join(config.REFERENCE_SITES) if config.REFERENCE_SITES else "none"
+    send(
+        f"🚀 <b>{agent_name}</b> started\n\n"
+        f"📁 Project: <code>{project_path}</code>\n"
+        f"🧠 Model: {model}\n"
+        f"⚡ Max tokens: {config.MAX_TOKENS:,}\n"
+        f"⏱ Delay: {config.DELAY}s\n"
+        f"💭 Thinking: {'on' if config.SHOW_THINKING else 'off'}\n"
+        f"🔧 Tools: {tools_count} | Skills: {skills_count}\n"
+        f"🗄 DB: {db}\n"
+        f"🌐 Reference sites: {refs}\n\n"
+        f"🔌 MCP:\n{mcp_list}"
+    )
 
 
 def notify_stop(agent_name: str, iterations: int, total_cost: float = 0):
