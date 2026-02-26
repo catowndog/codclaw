@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "rc-devtools": {
+      "command": "npx",
+      "args": ["@reverse-craft/rc-devtools-mcp@latest"]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "${PROJECT_PATH}"]
+    },
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "${DATABASE_URL}"]
+    }
+  }
+}
