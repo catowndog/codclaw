@@ -17,7 +17,6 @@ from skills_manager import SkillsManager
 from builtin_tools import BuiltinTools, BUILTIN_TOOLS
 from stats import TokenStats
 
-# Context window for models (tokens)
 MODEL_CONTEXT_WINDOWS = {
     "claude-opus-4-6": 200_000,
     "claude-opus-4-5": 200_000,

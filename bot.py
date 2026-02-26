@@ -29,7 +29,6 @@ from skills_manager import SkillsManager
 import telegram
 
 
-# ─── Graceful Stop Flag ──────────────────────────────────────────────────────
 
 _stop_requested = False
 _original_term_settings = None
@@ -698,7 +697,6 @@ Then an empty line, then the full skill content starting with the one-line descr
     display.show_skill_created(skill_name, len(content))
 
 
-# ─── Entry Point ──────────────────────────────────────────────────────────────
 
 
 def main():
