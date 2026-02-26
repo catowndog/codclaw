@@ -315,11 +315,14 @@ class AnthropicAgent:
             raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:500]}")
         return resp.json()
 
+    _TG_SKIP_TOOLS = {"evaluate_script", "get_snapshot"}
+
     async def _execute_tool(self, tool_name: str, tool_args: dict) -> str:
         """Execute a tool call — route to built-in, MCP, or skills manager."""
         import telegram
         args_str = json.dumps(tool_args, ensure_ascii=False)[:200] if tool_args else ""
-        telegram.notify_tool_call(tool_name, args_str)
+        if not any(skip in tool_name for skip in self._TG_SKIP_TOOLS):
+            telegram.notify_tool_call(tool_name, args_str)
 
         if self.builtin and BuiltinTools.is_builtin_tool(tool_name):
             return await self.builtin.execute_tool(tool_name, tool_args)
@@ -336,6 +339,9 @@ class AnthropicAgent:
             result = await self.mcp.call_tool(tool_name, tool_args)
             if "screenshot" in tool_name:
                 self._send_screenshot_to_tg(tool_args, result)
+                self._auto_save_screenshot(tool_args, result)
+            if "get_snapshot" in tool_name:
+                self._auto_save_snapshot(tool_args, result)
             return result
 
         return f"Unknown tool: {tool_name}"
@@ -375,6 +381,43 @@ class AnthropicAgent:
                         return
                     except Exception:
                         pass
+
+    def _auto_save_snapshot(self, tool_args: dict, result: str):
+        """Auto-save DOM snapshot text to .temp/references/snapshots/."""
+        if not result or not isinstance(result, str) or result.startswith("Error"):
+            return
+        try:
+            import time as _time
+            snapshots_dir = os.path.join(config.TEMP_DIR, "references", "snapshots")
+            os.makedirs(snapshots_dir, exist_ok=True)
+            timestamp = _time.strftime("%Y%m%d-%H%M%S")
+            filename = f"snapshot-{timestamp}.txt"
+            filepath = os.path.join(snapshots_dir, filename)
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(result)
+            display.show_info(f"Snapshot auto-saved: {filepath}")
+        except Exception as e:
+            display.show_warning(f"Failed to auto-save snapshot: {e}")
+
+    def _auto_save_screenshot(self, tool_args: dict, result: str):
+        """Auto-save screenshot binary data to .temp/references/screenshots/."""
+        import base64
+        try:
+            import time as _time
+            raw = getattr(self.mcp, '_last_binary_data', None) if self.mcp else None
+            if not raw:
+                return
+            screenshots_dir = os.path.join(config.TEMP_DIR, "references", "screenshots")
+            os.makedirs(screenshots_dir, exist_ok=True)
+            timestamp = _time.strftime("%Y%m%d-%H%M%S")
+            filename = f"screenshot-{timestamp}.png"
+            filepath = os.path.join(screenshots_dir, filename)
+            img = base64.b64decode(raw) if isinstance(raw, str) else raw
+            with open(filepath, "wb") as f:
+                f.write(img)
+            display.show_info(f"Screenshot auto-saved: {filepath}")
+        except Exception as e:
+            display.show_warning(f"Failed to auto-save screenshot: {e}")
 
     def _process_response(self, response: dict) -> dict:
         """Process response content blocks and display them."""

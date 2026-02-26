@@ -1,17 +1,32 @@
+import time
+
 import httpx
 import config
 
+_last_send_time = 0.0
+_MIN_INTERVAL = 0.5  # seconds between messages to avoid Telegram rate limiting
+
 
 def send(text: str, parse_mode: str = "HTML") -> bool:
+    global _last_send_time
     if not config.TG_BOT_TOKEN or not config.TG_USER_ID:
         return False
+
+    # Rate limit: wait if sending too fast
+    now = time.time()
+    elapsed = now - _last_send_time
+    if elapsed < _MIN_INTERVAL:
+        time.sleep(_MIN_INTERVAL - elapsed)
+
     url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/sendMessage"
     if len(text) > 4000:
         text = text[:4000] + "\n\n... (truncated)"
     try:
         resp = httpx.post(url, json={"chat_id": config.TG_USER_ID, "text": text, "parse_mode": parse_mode, "disable_web_page_preview": True}, timeout=10)
+        _last_send_time = time.time()
         return resp.status_code == 200
     except Exception:
+        _last_send_time = time.time()
         return False
 
 

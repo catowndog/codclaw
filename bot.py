@@ -30,6 +30,18 @@ import telegram
 
 
 
+GRACEFUL_STOP_PROMPT = """IMPORTANT: The operator has requested a graceful shutdown.
+
+You MUST now wrap up your work:
+1. Finish any file you are currently editing — do NOT leave partial code
+2. Save all unsaved changes
+3. Run `git add -A && git commit -m "WIP: graceful stop — save current progress"` to preserve your work
+4. Update .temp/plan.md — mark what is done [x], note what is in progress with details so you can resume later
+5. Write a brief summary of current state and next steps to .temp/notes.md
+6. This is your LAST iteration — make it count
+
+After completing these steps, end your response."""
+
 _stop_requested = False
 _original_term_settings = None
 
@@ -361,7 +373,7 @@ Your working directory is .temp/ inside PROJECT_PATH. Use it for:
 7. **BE THOROUGH** — Don't skip steps. If the plan says "write tests", write actual tests.
 8. **SAVE KNOWLEDGE** — If you solve a hard problem, create a skill for future reference.
 9. **REPORT PROGRESS** — End every iteration with a clear summary of what was done.
-10. **NEVER STOP** — Keep working through the plan until all tasks are complete."""
+10. **NEVER STOP** — Keep working forever. When all plan tasks are done, research new ideas (web_search, browse reference sites with rc-devtools), generate new improvement tasks, add them to plan.md, and execute them. There is ALWAYS something to improve, optimize, or add."""
 
 
 def build_initial_message(plan_content: str, file_listing: str, image_blocks: list[dict] | None = None):
@@ -393,13 +405,21 @@ Report your progress after each action."""
 
 def build_continuation_message(plan_content: str) -> str:
     """Build the continuation message for subsequent iterations."""
-    return f"""Continue your work. Here is the updated plan:
+    return f"""Continue your work. Here is the current plan:
 
 ## Current Plan (.temp/plan.md):
 {plan_content}
 
-Review the plan, see what's been done and what remains, and continue with the next task.
-If all tasks are complete, summarize what was accomplished and suggest next steps."""
+Review the plan and continue with the next uncompleted task.
+
+If ALL tasks are marked [x] (complete), you MUST:
+1. Analyze the current project state — review code, run tests, check for issues
+2. Search the web (web_search) for new ideas, best practices, and improvements relevant to this project
+3. Browse competitor/reference sites using rc-devtools for inspiration
+4. Generate NEW tasks and add them to plan.md — improvements, optimizations, new features, better UX, tests, documentation
+5. Start executing the new tasks immediately
+
+NEVER stop working. There is ALWAYS something to improve, optimize, test, or add."""
 
 
 
@@ -480,18 +500,21 @@ async def run_agent():
         display.show_info(f"Found {len(upload_images) // 2} reference image(s) in .temp/uploads/")
 
     iteration = 1
+    shutdown_mode = False
 
     _setup_terminal()
 
     try:
         while True:
-            if _check_keypress():
-                display.show_warning("Graceful stop requested — finishing current work...")
-                break
+            if _check_keypress() and not shutdown_mode:
+                display.show_warning("Graceful stop requested — sending wrap-up prompt...")
+                shutdown_mode = True
 
             display.show_iteration_header(iteration)
 
-            if iteration == 1 and not agent.messages:
+            if shutdown_mode:
+                user_msg = GRACEFUL_STOP_PROMPT
+            elif iteration == 1 and not agent.messages:
                 user_msg = build_initial_message(plan_content, file_listing, upload_images)
             else:
                 plan_content = read_plan_file()
@@ -506,6 +529,9 @@ async def run_agent():
             except Exception as e:
                 display.show_error(f"Agent error: {e}")
                 telegram.notify_error(config.AGENT_NAME, str(e))
+                if shutdown_mode:
+                    display.show_warning("Wrap-up failed — shutting down anyway.")
+                    break
                 display.show_info(f"Retrying in {config.DELAY} seconds...")
                 await asyncio.sleep(config.DELAY)
                 iteration += 1
@@ -519,23 +545,27 @@ async def run_agent():
                 tokens_in=stats.total_input_tokens, tokens_out=stats.total_output_tokens,
             )
 
+            if shutdown_mode:
+                display.show_info("Wrap-up complete. Shutting down.")
+                break
+
             if stats.should_report(interval_seconds=300):
                 display.show_stats(stats.format_summary())
 
             iteration += 1
 
-            if _check_keypress():
-                display.show_warning("Graceful stop — iteration complete, shutting down...")
-                break
+            if _check_keypress() and not shutdown_mode:
+                display.show_warning("Graceful stop requested — will wrap up next iteration...")
+                shutdown_mode = True
+                continue
 
             display.show_info(f"Waiting {config.DELAY}s before next iteration... (press L to stop)")
-            for _ in range(config.DELAY * 10): 
+            for _ in range(config.DELAY * 10):
                 await asyncio.sleep(0.1)
-                if _check_keypress():
-                    display.show_warning("Graceful stop requested during wait — shutting down...")
+                if _check_keypress() and not shutdown_mode:
+                    display.show_warning("Graceful stop requested — will wrap up next iteration...")
+                    shutdown_mode = True
                     break
-            if _stop_requested:
-                break
 
     except KeyboardInterrupt:
         display.show_shutdown()
