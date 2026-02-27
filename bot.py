@@ -522,6 +522,18 @@ def read_tasks_file() -> str:
     return ""
 
 
+def _get_upload_filenames() -> list[str]:
+    """List image filenames in .temp/uploads/ (without loading content)."""
+    uploads_dir = Path(config.TEMP_DIR) / "uploads"
+    if not uploads_dir.exists():
+        return []
+    image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+    return sorted(
+        f.name for f in uploads_dir.iterdir()
+        if f.is_file() and f.suffix.lower() in image_extensions
+    )
+
+
 def build_continuation_message(plan_content: str) -> str:
     """Build the continuation message for subsequent iterations."""
     tasks_content = read_tasks_file()
@@ -539,11 +551,22 @@ def build_continuation_message(plan_content: str) -> str:
 File not found. You MUST create it now with your first tasks based on the plan.
 """
 
+    uploads_section = ""
+    upload_files = _get_upload_filenames()
+    if upload_files:
+        files_list = ", ".join(upload_files)
+        uploads_section = f"""
+
+## Reference Images (.temp/uploads/)
+You have {len(upload_files)} reference image(s) available: {files_list}
+These were shown to you at the start. ALWAYS keep them in mind when implementing UI, design, layout, and visual features.
+If you need to review them, use `read_file` or `list_directory` on .temp/uploads/."""
+
     return f"""Continue your work.
 
 ## User's Plan (.temp/plan.md):
 {plan_content}
-{tasks_section}
+{tasks_section}{uploads_section}
 Pick the next uncompleted task from tasks.md and execute it.
 After completing it, update tasks.md (move to Completed with result).
 If no tasks remain — generate new ones (search web, browse competitors, review code).
