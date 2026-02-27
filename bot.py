@@ -1059,7 +1059,7 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
 
             if pending and response_text:
                 fix_response = response_text[:3500] if len(response_text) > 3500 else response_text
-                telegram.send(f"📋 <b>Response to your request:</b>\n\n<pre>{pending[:200]}</pre>\n\n{fix_response}")
+                telegram.send(f"📋 <b>Response to your request:</b>\n\n<pre>{telegram.esc(pending[:200])}</pre>\n\n{telegram.esc(fix_response)}")
 
             summary = response_text[:800] if response_text else "(no response)"
             work_desc = _extract_work_description(response_text)

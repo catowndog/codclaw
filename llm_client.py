@@ -586,7 +586,7 @@ class LLMAgent:
         config.log_output(f"📨 {text[:200]}")
         try:
             import telegram as _tg
-            _tg.send(f"📨 <b>Agent message:</b>\n\n{text[:600]}")
+            _tg.send(f"📨 <b>Agent message:</b>\n\n{_tg.esc(text[:600])}")
         except Exception:
             pass
 
@@ -1086,7 +1086,7 @@ class LLMAgent:
             _resp_text = "\n".join(result["text_parts"]).strip()
             if _resp_text:
                 import telegram as _tg
-                _tg.send(f"💬 <b>Response:</b>\n\n{_resp_text[:600]}")
+                _tg.send(f"💬 <b>Response:</b>\n\n{_tg.esc(_resp_text[:600])}")
 
             stop_reason = response.get("stop_reason")
 
