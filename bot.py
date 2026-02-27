@@ -649,6 +649,17 @@ IMPORTANT:
 
 
 
+async def _wait_if_paused():
+    """Async callback — blocks execution until pause is lifted.
+
+    Passed to run_turn() so tool calls and API requests pause immediately
+    when /pause is received from Telegram or P is pressed in console.
+    """
+    while _pause_requested and not _stop_requested:
+        await asyncio.sleep(0.5)
+        _check_keypress()
+
+
 async def _telegram_poller():
     """Background asyncio task — polls Telegram for commands every 2 seconds."""
     global _stop_requested, _pause_requested, _pending_user_message
@@ -805,7 +816,7 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
                 tool_sigs = agent.get_starlark_tool_signatures()
                 system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary, tool_signatures=tool_sigs)
 
-                response_text = await agent.run_turn(user_msg, system_prompt, check_interrupt=_check_keypress)
+                response_text = await agent.run_turn(user_msg, system_prompt, check_interrupt=_check_keypress, check_pause=_wait_if_paused)
             except Exception as e:
                 display.show_error(f"Agent error: {e}")
                 telegram.notify_error(config.AGENT_NAME, str(e))

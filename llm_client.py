@@ -724,13 +724,28 @@ class LLMAgent:
             return result
 
         if self.mcp and self.mcp.is_mcp_tool(tool_name):
-            result = await self.mcp.call_tool(tool_name, tool_args)
-            if "screenshot" in tool_name:
-                self._send_screenshot_to_tg(tool_args, result)
-                self._auto_save_screenshot(tool_args, result)
-            if "get_snapshot" in tool_name:
-                self._auto_save_snapshot(tool_args, result)
-            return result
+            if getattr(self, '_check_pause', None):
+                await self._check_pause()
+            max_retries = 3
+            last_error = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    result = await self.mcp.call_tool(tool_name, tool_args)
+                    if isinstance(result, str) and result.startswith("Error"):
+                        raise RuntimeError(result)
+                    if "screenshot" in tool_name:
+                        self._send_screenshot_to_tg(tool_args, result)
+                        self._auto_save_screenshot(tool_args, result)
+                    if "get_snapshot" in tool_name:
+                        self._auto_save_snapshot(tool_args, result)
+                    return result
+                except Exception as e:
+                    last_error = e
+                    display.show_warning(f"MCP {tool_name} failed (attempt {attempt}/{max_retries}): {e}")
+                    if attempt < max_retries:
+                        display.show_info(f"Retrying in 2s...")
+                        await asyncio.sleep(2)
+            return f"Error after {max_retries} retries: {last_error}"
 
         return f"Unknown tool: {tool_name}"
 
@@ -844,7 +859,7 @@ class LLMAgent:
 
         return result
 
-    async def run_turn(self, user_content: str, system: str, check_interrupt: Callable[[], bool] | None = None) -> str:
+    async def run_turn(self, user_content: str, system: str, check_interrupt: Callable[[], bool] | None = None, check_pause: Callable[[], Any] | None = None) -> str:
         """Run a complete agent turn with Starlark-based tool calling.
 
         The LLM writes ```starlark code blocks in its text response.
@@ -853,17 +868,22 @@ class LLMAgent:
         Args:
             check_interrupt: optional callback called between tool calls and after API responses.
                              Returns True if a graceful stop was requested.
+            check_pause: optional async callback that blocks while pause is active.
         """
         self.messages.append({"role": "user", "content": user_content})
 
         tools = self._build_tools()
         all_text_parts = []
         max_starlark_loops = 50
+        self._check_pause = check_pause
 
         executor = StarlarkExecutor(self._execute_tool)
         executor.register_tools(self._get_all_tool_names())
 
         for loop_idx in range(max_starlark_loops):
+            if check_pause:
+                await check_pause()
+
             if self._should_compress():
                 await self._compress_history(system)
 
@@ -875,6 +895,11 @@ class LLMAgent:
             result = self._process_response(response)
             all_text_parts.extend(result["text_parts"])
 
+            _resp_text = "\n".join(result["text_parts"]).strip()
+            if _resp_text:
+                import telegram as _tg
+                _tg.send(f"💬 <b>Response:</b>\n\n{_resp_text[:600]}")
+
             stop_reason = response.get("stop_reason")
 
             self.messages.append({"role": "assistant", "content": response["content"]})
@@ -885,6 +910,8 @@ class LLMAgent:
             if starlark_blocks:
                 all_results = []
                 for i, code in enumerate(starlark_blocks):
+                    if check_pause:
+                        await check_pause()
                     if check_interrupt:
                         check_interrupt()
 
@@ -910,6 +937,8 @@ class LLMAgent:
             if stop_reason == "tool_use" and result["tool_calls"]:
                 tool_results = []
                 for tc in result["tool_calls"]:
+                    if check_pause:
+                        await check_pause()
                     if check_interrupt:
                         check_interrupt()
 
