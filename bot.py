@@ -71,8 +71,6 @@ def _stdin_reader_thread():
             ch = sys.stdin.read(1)
             if not ch:
                 break
-            # Handle pause/resume/stop DIRECTLY in this thread
-            # because the main thread may be blocked on _pause_event.wait()
             if ch.lower() == "r" and _pause_requested:
                 _pause_requested = False
                 _pause_event.set()
@@ -85,7 +83,7 @@ def _stdin_reader_thread():
             elif ch.lower() == "l" and not _stop_requested:
                 _stop_requested = True
                 _stop_shown = True
-                _pause_event.set()  # unblock pause if paused, so stop can proceed
+                _pause_event.set()  
                 _show_stop_panel()
             else:
                 _input_queue.put(ch)
@@ -839,13 +837,11 @@ def _handle_tasks():
     """Send current tasks + what agent is doing now to Telegram."""
     parts = []
 
-    # Current activity from output log
     last_lines = config.get_output_log(5)
     if last_lines:
         activity = "\n".join(last_lines)
         parts.append(f"🔨 <b>Now doing:</b>\n<pre>{activity[:500]}</pre>")
 
-    # Tasks from tasks.md
     tasks_path = os.path.join(config.TEMP_DIR, "tasks.md")
     if os.path.exists(tasks_path):
         try:
@@ -977,7 +973,6 @@ async def run_agent():
     stats = TokenStats(model=config.get_model())
     agent = LLMAgent(mcp_manager=mcp, skills_manager=skills, builtin_tools=builtin, token_stats=stats)
 
-    # Setup terminal + input thread EARLY so P/R/L work during research phase
     _setup_terminal()
     _start_stdin_thread()
 
@@ -1172,13 +1167,12 @@ Then an empty line, then the full skill content starting with the one-line descr
         "messages": [{"role": "user", "content": description}],
         "stream": True,
     }
-    # Add thinking if enabled (EFFORT-based budget)
     if config.THINKING_ENABLED and config.EFFORT != "low":
         if config.EFFORT == "medium":
             budget = min(16384, config.MAX_TOKENS - 8192)
         elif config.EFFORT == "high":
             budget = min(config.MAX_TOKENS // 2, config.MAX_TOKENS - 8192)
-        else:  # max
+        else:  
             budget = config.MAX_TOKENS - 8192
         budget = max(budget, 4096)
         body["thinking"] = {"type": "enabled", "budget_tokens": budget}

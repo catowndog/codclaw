@@ -57,13 +57,13 @@ _skills_raw = os.getenv("SKILLS_DIR", str(_script_dir / "skills"))
 SKILLS_DIR: str = str((_script_dir / _skills_raw).resolve()) if not os.path.isabs(_skills_raw) else _skills_raw
 
 IMAGE_MODEL: str = os.getenv("IMAGE_MODEL", "gpt-5-image")
+VIRTUAL_DISPLAY: bool = os.getenv("VIRTUAL_DISPLAY", "true").lower() in ("true", "1", "yes")
 
 TEMP_DIR: str = os.path.join(PROJECT_PATH, ".temp")
 PLAN_FILE: str = os.path.join(TEMP_DIR, "plan.md")
 CONVERSATION_FILE: str = os.path.join(TEMP_DIR, "conversation.json")
 CODES_DIR: str = os.path.join(TEMP_DIR, "codes")
 
-# Global output log for /ping command — shared across all modules
 _output_log: list[str] = []
 _OUTPUT_LOG_MAX = 50
 

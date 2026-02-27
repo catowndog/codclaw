@@ -73,7 +73,6 @@ _SAFE_LIST_METHODS = {"append", "extend", "insert", "pop", "remove", "sort", "re
 
 _SAFE_DICT_METHODS = {"get", "keys", "values", "items", "update", "pop", "setdefault", "copy", "clear"}
 
-# Threshold for caching large tool results (chars)
 _RESULT_CACHE_THRESHOLD = 10_000
 _RESULT_CACHE_PREVIEW = 2_000
 
@@ -96,17 +95,11 @@ def _sanitize_code(code: str) -> str:
     - Fixes invalid escape sequences that LLMs sometimes generate
     - Removes null bytes
     """
-    # Remove null bytes
     code = code.replace("\x00", "")
 
-    # Strip any remaining markdown fence markers
     code = re.sub(r'^```\w*\s*\n?', '', code)
     code = re.sub(r'\n?```\s*$', '', code)
 
-    # Fix common invalid escape sequences in regular strings (not f-strings)
-    # LLMs sometimes write \n, \t inside regular strings that Python treats as escapes
-    # but they also write intentional ones — so we only fix truly invalid ones
-    # Replace \p, \d, \w etc. (regex chars) that aren't valid Python escapes
     invalid_escapes = re.compile(r'(?<!\\)\\([^\\\'\"abfnrtvx0-9uUN\n])')
     code = invalid_escapes.sub(r'\\\\\1', code)
 
@@ -146,10 +139,10 @@ class StarlarkExecutor:
         self._env: dict[str, Any] = {}
         self._output: list[str] = []
         self._call_log: list[dict] = []
-        self._messages: list[str] = []  # real-time messages sent via send_message()
-        self._output_entries: list[dict] = []  # explicit output() entries
+        self._messages: list[str] = []  
+        self._output_entries: list[dict] = []  
         self._var_store: dict[str, Any] = var_store if var_store is not None else {}
-        self._result_cache: dict[str, str] = {}  # ref_id -> full result text
+        self._result_cache: dict[str, str] = {} 
         self._send_message_fn = send_message_fn
 
     def register_tools(self, tool_names: list[str]):
@@ -176,14 +169,10 @@ class StarlarkExecutor:
         self._call_log = []
         self._messages = []
         self._output_entries = []
-        # NOTE: _result_cache is NOT cleared between execute() calls
-        # so refs from block 1 can be accessed in block 2 within the same turn
 
-        # Inject persistent variables from var_store as _name globals
         for name, value in self._var_store.items():
             self._env[f"_{name}"] = value
 
-        # Register built-in utility functions
         self._env["print"] = lambda *args, **kwargs: self._output.append(
             " ".join(str(a) for a in args)
         )
@@ -194,9 +183,8 @@ class StarlarkExecutor:
         self._env["set_var"] = self._builtin_set_var
         self._env["get_var"] = self._builtin_get_var
         self._env["get_result"] = self._builtin_get_result
-        self._env["sleep"] = self._builtin_sleep_sync  # placeholder, real async handled in _eval_call
+        self._env["sleep"] = self._builtin_sleep_sync  
 
-        # Sanitize code before parsing
         code = _sanitize_code(code)
 
         try:
@@ -216,7 +204,6 @@ class StarlarkExecutor:
         try:
             await self._exec_body(tree.body)
 
-            # Collect user-defined variables (exclude builtins and internals)
             _internal_names = {
                 "print", "json_loads", "json_dumps", "send_message",
                 "output", "set_var", "get_var", "get_result", "sleep",
@@ -229,7 +216,6 @@ class StarlarkExecutor:
                 and not k.startswith("_")
             }
 
-            # Collect var_updates from set_var calls and named output() calls
             var_updates = {}
             for entry in self._output_entries:
                 if entry.get("name"):
@@ -268,7 +254,6 @@ class StarlarkExecutor:
                 "var_updates": {},
             }
 
-    # ── Built-in utility functions ───────────────────────────────────────
 
     def _builtin_send_message(self, text: str):
         """Send a real-time message to the user during code execution."""
@@ -289,7 +274,6 @@ class StarlarkExecutor:
             name = str(args[0])
             value = args[1]
             self._output_entries.append({"name": name, "value": value})
-            # Also store in var_store for cross-block persistence
             self._var_store[name] = value
         else:
             raise _StarlarkError("output() takes 1 or 2 arguments: output(value) or output('name', value)")
@@ -314,10 +298,8 @@ class StarlarkExecutor:
 
     def _builtin_sleep_sync(self, seconds: float):
         """Placeholder — actual async sleep is handled in _eval_call."""
-        # This is never actually called; the async version is used instead
         pass
 
-    # ── Core execution ───────────────────────────────────────────────────
 
     def _repr_value(self, v: Any) -> str:
         """Safe string representation of a value."""
@@ -520,11 +502,10 @@ class StarlarkExecutor:
         if isinstance(node.func, ast.Name):
             func_name = node.func.id
 
-            # Handle async sleep specially
             if func_name == "sleep":
                 args = [await self._eval_expr(a) for a in node.args]
                 seconds = float(args[0]) if args else 1.0
-                seconds = min(seconds, 30.0)  # Safety limit: max 30 seconds
+                seconds = min(seconds, 30.0)  
                 self._output.append(f"[sleep] {seconds}s...")
                 await asyncio.sleep(seconds)
                 return None
@@ -604,7 +585,6 @@ class StarlarkExecutor:
         self._output.append(f"[tool:{tool_name}] → calling...")
         result_str = await self._dispatch(tool_name, tool_args)
 
-        # Cache large results and truncate for context efficiency
         result_preview = str(result_str)[:300]
         ref_id = None
         if isinstance(result_str, str) and len(result_str) > _RESULT_CACHE_THRESHOLD:
@@ -621,7 +601,6 @@ class StarlarkExecutor:
         })
         self._output.append(f"[tool:{tool_name}] ← done ({len(str(result_str))} chars){f' [cached: {ref_id}]' if ref_id else ''}")
 
-        # Auto-convert JSON results to native types (dict/list)
         if isinstance(result_str, str):
             converted = _try_json_convert(result_str)
             if converted is not None:
@@ -720,7 +699,6 @@ def _try_json_convert(s: str) -> Any:
     s_stripped = s.strip()
     if not s_stripped:
         return None
-    # Only convert if it looks like JSON object or array
     if not (s_stripped.startswith("{") or s_stripped.startswith("[")):
         return None
     try:
@@ -805,7 +783,6 @@ def format_starlark_results(result: dict) -> str:
     output_entries = result.get("output_entries", [])
 
     if output_entries:
-        # OUTPUT MODE: only show explicit output() entries + errors
         parts.append("## Output\n")
         for i, entry in enumerate(output_entries, 1):
             name = entry.get("name")
@@ -818,7 +795,6 @@ def format_starlark_results(result: dict) -> str:
             else:
                 parts.append(f"### Output {i}\n```\n{value_str}\n```\n")
     else:
-        # STANDARD MODE: show tool call results
         if result.get("call_log"):
             parts.append("## Tool Call Results\n")
             for i, call in enumerate(result["call_log"], 1):

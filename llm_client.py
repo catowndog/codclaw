@@ -85,7 +85,6 @@ def _extract_xml_tool_calls(text: str) -> list[dict]:
         try:
             data = json.loads(match)
             name = data.get("name", "")
-            # Support both "arguments" and "input" keys
             args = data.get("arguments", data.get("input", data.get("params", {})))
             if isinstance(args, str):
                 try:
@@ -579,7 +578,6 @@ class LLMAgent:
         self.builtin = builtin_tools
         self.stats = token_stats
         self.messages: list[dict] = []
-        # Persistent variable store for cross-block Starlark persistence
         self._var_store: dict[str, any] = {}
 
     def _send_message_for_starlark(self, text: str):
@@ -625,13 +623,10 @@ class LLMAgent:
         so total doesn't exceed context_window.
         """
         context_window = self._get_context_window()
-        # Estimate input tokens
         input_estimate = self._estimate_tokens()
-        input_estimate += len(system) // 4  # system prompt
+        input_estimate += len(system) // 4  
         if tools:
-            input_estimate += len(json.dumps(tools)) // 4  # tool definitions
-        # Reserve space: input + output + 2K safety margin
-        # Minimum 32K output tokens — anything less is unusable for the agent
+            input_estimate += len(json.dumps(tools)) // 4  #
         MIN_OUTPUT_TOKENS = 64_000
         available = context_window - input_estimate - 2000
         safe = min(config.MAX_TOKENS, max(available, MIN_OUTPUT_TOKENS))
@@ -651,13 +646,12 @@ class LLMAgent:
             "stream": True,
         }
 
-        # Thinking budget based on EFFORT level (low = off, medium/high/max = scaled)
         if config.THINKING_ENABLED and config.EFFORT != "low":
             if config.EFFORT == "medium":
                 budget = min(16384, safe_max_tokens - 8192)
             elif config.EFFORT == "high":
                 budget = min(safe_max_tokens // 2, safe_max_tokens - 8192)
-            else:  # max
+            else:  
                 budget = safe_max_tokens - 8192
             budget = max(budget, 4096)
             body["thinking"] = {"type": "enabled", "budget_tokens": budget}
@@ -788,7 +782,6 @@ class LLMAgent:
             await self._check_pause()
 
         import telegram
-        # Log to output buffer for /ping
         args_preview = json.dumps(tool_args, ensure_ascii=False)[:150] if tool_args else ""
         config.log_output(f"🔧 {tool_name}: {args_preview}")
 
@@ -826,7 +819,7 @@ class LLMAgent:
                             if attempt < max_retries:
                                 display.show_info("Retrying MCP call to get fresh screenshot...")
                                 await asyncio.sleep(1)
-                                continue  # retry the whole MCP call
+                                continue  
                     if "get_snapshot" in tool_name:
                         try:
                             self._auto_save_snapshot(tool_args, result)
@@ -878,7 +871,6 @@ class LLMAgent:
                             data = match.group(1) if match.lastindex else match.group(0)
                             if telegram.send_photo_bytes(base64.b64decode(data), "📸 Screenshot"):
                                 return
-                # If we got here, no data source worked — not an error, just no data
                 return
             except Exception as e:
                 display.show_warning(f"Failed to send screenshot to TG (attempt {attempt}/2): {e}")
@@ -898,7 +890,7 @@ class LLMAgent:
                 with open(filepath, "w", encoding="utf-8") as f:
                     f.write(result)
                 display.show_info(f"Snapshot auto-saved: {filepath}")
-                return  # success
+                return  
             except Exception as e:
                 display.show_warning(f"Failed to save snapshot (attempt {attempt}/2): {e}")
 
@@ -910,20 +902,17 @@ class LLMAgent:
                 import time as _time
                 raw = getattr(self.mcp, '_last_binary_data', None) if self.mcp else None
 
-                # If no binary data from MCP, try to extract base64 from result text
                 if not raw and isinstance(result, str):
-                    # Try data:image URI
                     m = re.search(r'data:image/[^;]+;base64,([A-Za-z0-9+/=]+)', result)
                     if m:
                         raw = m.group(1)
                     else:
-                        # Try raw base64 blob (500+ chars)
                         m = re.search(r'([A-Za-z0-9+/=]{500,})', result)
                         if m:
                             raw = m.group(1)
 
                 if not raw:
-                    return  # silently skip — no screenshot data available
+                    return  
 
                 screenshots_dir = os.path.join(config.TEMP_DIR, "references", "screenshots")
                 os.makedirs(screenshots_dir, exist_ok=True)
@@ -934,7 +923,7 @@ class LLMAgent:
                 with open(filepath, "wb") as f:
                     f.write(img)
                 display.show_info(f"Screenshot auto-saved: {filepath}")
-                return  # success
+                return  
             except Exception as e:
                 display.show_warning(f"Failed to save screenshot (attempt {attempt}/2): {e}")
 
@@ -958,11 +947,8 @@ class LLMAgent:
             elif bt == "text":
                 text = block.get("text", "")
                 if text.strip():
-                    # Check for <tool_call> XML tags in text (some models/proxies
-                    # write tool calls as text instead of native tool_use blocks)
                     xml_tools = _extract_xml_tool_calls(text)
                     if xml_tools:
-                        # Strip the XML tool_call tags from displayed text
                         import re as _re
                         clean_text = _re.sub(
                             r'<tool_call>\s*\{.*?\}\s*</tool_call>',
@@ -1014,7 +1000,6 @@ class LLMAgent:
         max_starlark_loops = 50
         self._check_pause = check_pause
 
-        # Create one executor per turn — shares result cache across all starlark blocks
         executor = StarlarkExecutor(
             self._execute_tool,
             var_store=self._var_store,
@@ -1029,7 +1014,6 @@ class LLMAgent:
             if self._should_compress():
                 await self._compress_history(system)
 
-            # Force compression if max_tokens would be too small
             safe = self._calc_safe_max_tokens(system, tools)
             if safe < 64_000 and len(self.messages) > KEEP_RECENT_MESSAGES + 2:
                 display.show_warning(f"Input too large — safe_max_tokens={safe:,}, forcing compression...")
@@ -1044,8 +1028,6 @@ class LLMAgent:
 
             result = self._process_response(response)
 
-            # Validate tool_use inputs — skip empty ones that require params (truncated by max_tokens)
-            # Tools without required params (take_screenshot, list_skills, etc.) are OK with {}
             _no_required = set()
             for t in tools:
                 schema = t.get("input_schema", {})
@@ -1070,8 +1052,6 @@ class LLMAgent:
 
             stop_reason = response.get("stop_reason")
 
-            # Detect "thinking-only" responses: model spent all budget on thinking,
-            # produced no text and no tool calls. Treat as incomplete — request continuation.
             if (result["has_thinking"] and not result["text_parts"]
                     and not result["tool_calls"] and stop_reason == "end_turn"):
                 display.show_warning("Response contained only thinking — requesting continuation...")
@@ -1101,7 +1081,6 @@ class LLMAgent:
                     if exec_result.get("error"):
                         display.show_error(f"Starlark error: {exec_result['error']}")
 
-                    # Collect persistent variable updates
                     var_updates = exec_result.get("var_updates", {})
                     if var_updates:
                         self._var_store.update(var_updates)

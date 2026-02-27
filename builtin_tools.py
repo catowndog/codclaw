@@ -906,7 +906,6 @@ class BuiltinTools:
         except ImportError as e:
             return f"Error: missing dependency: {e}"
 
-        # Use OpenAI-compatible chat completions endpoint
         base = cfg.OPENAI_BASE_URL.rstrip("/")
         if not base.endswith("/chat/completions"):
             base += "/chat/completions"
@@ -939,7 +938,6 @@ class BuiltinTools:
                 message = choices[0].get("message", {})
                 img_bytes = None
 
-                # Path 1: message.images[] (gpt-5-image returns images here)
                 images = message.get("images", [])
                 for img in images:
                     img_url_obj = img.get("image_url", {})
@@ -956,7 +954,6 @@ class BuiltinTools:
                             img_bytes = img_resp.content
                             break
 
-                # Path 2: content as list of blocks
                 if not img_bytes:
                     content = message.get("content", "")
                     if isinstance(content, list):
@@ -974,7 +971,6 @@ class BuiltinTools:
                                     img_bytes = base64.b64decode(source["data"])
                                     break
 
-                # Path 3: content as string with embedded base64
                 if not img_bytes:
                     content = message.get("content", "")
                     if isinstance(content, str) and content:
@@ -988,7 +984,6 @@ class BuiltinTools:
                                     img_bytes = base64.b64decode(m.group(1))
                                 except Exception:
                                     pass
-                    # Try URL in text
                     if not img_bytes:
                         m = re.search(r'(https?://\S+\.(?:png|jpg|jpeg|webp))', content)
                         if m:
@@ -998,13 +993,11 @@ class BuiltinTools:
                 if not img_bytes:
                     return f"Error: No image found in response. Content: {str(content)[:500]}"
 
-            # Save to file
             filepath = self._resolve_path(filename)
             filepath.parent.mkdir(parents=True, exist_ok=True)
             with open(filepath, "wb") as f:
                 f.write(img_bytes)
 
-            # Send to Telegram
             try:
                 import telegram
                 telegram.send_photo_bytes(img_bytes, f"🎨 {filename}")
@@ -1045,7 +1038,6 @@ class BuiltinTools:
 
             rel = filepath.relative_to(codes_dir)
 
-            # Match filename
             if regex.search(str(rel)):
                 try:
                     with open(filepath, "r", encoding="utf-8", errors="replace") as f:
@@ -1057,7 +1049,6 @@ class BuiltinTools:
                     break
                 continue
 
-            # Match content
             try:
                 with open(filepath, "r", encoding="utf-8", errors="strict") as f:
                     for line_num, line in enumerate(f, 1):
@@ -1087,7 +1078,6 @@ class BuiltinTools:
         codes_dir = Path(cfg.CODES_DIR)
         filepath = (codes_dir / path_str).resolve()
 
-        # Security: ensure path stays within codes_dir
         if not str(filepath).startswith(str(codes_dir.resolve())):
             return f"Error: path escapes codes directory: {path_str}"
 
