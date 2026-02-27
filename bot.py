@@ -35,31 +35,104 @@ GRACEFUL_STOP_PROMPT = """IMPORTANT: The operator has requested a graceful shutd
 You MUST now wrap up your work:
 1. Finish any file you are currently editing — do NOT leave partial code
 2. Save all unsaved changes
-3. Run `git add -A && git commit -m "WIP: graceful stop — save current progress"` to preserve your work
-4. Update .temp/plan.md — mark what is done [x], note what is in progress with details so you can resume later
-5. Write a brief summary of current state and next steps to .temp/notes.md
-6. This is your LAST iteration — make it count
+3. Add a final task to .temp/tasks.md: "- [x] SHUTDOWN: Final code review and verification" and move current in-progress tasks back to `[ ]` with notes
+4. Run a quick verification — check that the project builds/starts without errors, fix any critical issues
+5. Run `git add -A && git commit -m "WIP: graceful stop — save current progress"` to preserve your work
+6. Write a brief summary of current state and next steps to .temp/notes.md
+7. This is your LAST iteration — make it count
 
-After completing these steps, end your response."""
+After completing these steps, end with a DETAILED summary of the project state."""
 
 _stop_requested = False
+_stop_shown = False
 _original_term_settings = None
+_pending_user_message: str | None = None
 
 
 def _check_keypress() -> bool:
-    """Non-blocking check if 'l' was pressed in the terminal. Returns True if so."""
-    global _stop_requested
+    """Non-blocking check for keypresses. L = stop, Enter = user input."""
+    global _stop_requested, _stop_shown
     if _stop_requested:
         return True
     try:
         if select.select([sys.stdin], [], [], 0.0)[0]:
             ch = sys.stdin.read(1)
-            if ch.lower() == "l":
+            if ch.lower() == "l" and not _stop_requested:
                 _stop_requested = True
+                _stop_shown = True
+                from rich.console import Console
+                from rich.panel import Panel
+                from rich import box
+                c = Console()
+                c.print()
+                c.print(Panel(
+                    "[bold red]🛑 STOP SIGNAL RECEIVED[/bold red]\n\n"
+                    "[yellow]The agent will finish its current work and wrap up.\n"
+                    "This may take 3-5 minutes. Please wait...[/yellow]\n\n"
+                    "[dim]L key is now disabled. Ctrl+C for immediate kill.[/dim]",
+                    title="[bold red]Graceful Shutdown[/bold red]",
+                    border_style="red",
+                    box=box.HEAVY,
+                ))
+                c.print()
+                telegram.send("🛑 <b>STOP signal received</b>\n\nAgent is wrapping up (3-5 min)...")
                 return True
+            elif ch in ("\r", "\n") and not _stop_requested:
+                _collect_user_input()
     except Exception:
         pass
     return False
+
+
+def _collect_user_input():
+    """
+    Temporarily restore terminal, show a rich prompt, collect user input,
+    then re-enter cbreak mode. Stores the message in _pending_user_message.
+    """
+    global _pending_user_message, _original_term_settings
+    if _original_term_settings is not None:
+        try:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _original_term_settings)
+        except Exception:
+            pass
+
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich import box
+        c = Console()
+        c.print()
+        c.print(Panel(
+            "[bold cyan]Type your message for the agent.[/bold cyan]\n"
+            "[dim]This will be injected as a priority task in the next iteration.\n"
+            "Press Enter to send, or leave empty to cancel.[/dim]",
+            title="[bold yellow]✏️  User Input[/bold yellow]",
+            border_style="yellow",
+            box=box.DOUBLE,
+        ))
+        msg = input("  ▸ ")
+        if msg.strip():
+            _pending_user_message = msg.strip()
+            c.print(f"  [green]✓[/green] Message queued: [italic]{msg.strip()[:80]}{'...' if len(msg.strip()) > 80 else ''}[/italic]")
+            c.print()
+        else:
+            c.print("  [dim]Cancelled — empty input.[/dim]")
+            c.print()
+    except (KeyboardInterrupt, EOFError):
+        pass
+
+    try:
+        tty.setcbreak(sys.stdin.fileno())
+    except Exception:
+        pass
+
+
+def _take_pending_message() -> str | None:
+    """Take and clear the pending user message. Returns None if no message."""
+    global _pending_user_message
+    msg = _pending_user_message
+    _pending_user_message = None
+    return msg
 
 
 def _setup_terminal():
@@ -285,15 +358,47 @@ Available: {mcp_tools_str}
 {refs_section}
 # WORK PROCESS
 
+## Task Tracking — .temp/tasks.md (YOUR task list, you own it)
+You MUST maintain a task list in `.temp/tasks.md`. This is YOUR working task list (separate from plan.md which is the user's high-level plan).
+
+Format:
+```
+# Tasks
+
+## Current
+- [ ] Task description here
+
+## Completed
+- [x] What was done — brief result
+```
+
+Rules for tasks.md:
+- Read it at the start of every iteration
+- Pick the first `[ ]` task and work on it
+- After completing a task, move it to "Completed" section with a brief result note
+- When all tasks are `[ ]` done, you MUST generate NEW tasks:
+  1. Search the web (web_search) for ideas, best practices, improvements for this type of project
+  2. Browse competitor/reference sites using rc-devtools for UI/UX inspiration
+  3. Review existing code for potential improvements, optimizations, missing tests
+  4. Add 3-5 new meaningful tasks to the "Current" section
+- NEVER say "project is complete" or "all done" — there is ALWAYS more to improve
+- Each task should be specific and actionable, not vague
+
 ## Every Iteration:
-1. **Read the plan**: Open .temp/plan.md (it may have been updated)
-2. **Identify the next task**: Find the first uncompleted task (marked `[ ]`)
+1. **Read tasks**: Open .temp/tasks.md — find the next `[ ]` task
+2. **Read the plan**: Check .temp/plan.md for context (the user's high-level goals)
 3. **Load relevant skills**: Call `list_skills`, then `read_skill` for any applicable skill
 4. **Execute the task**: Use the best combination of tools. Break complex tasks into steps.
 5. **Verify the result**: Run tests, check output, validate files exist and are correct
-6. **Update the plan**: Mark the completed task `[x]` using write_file/execute_shell
-7. **Save notes**: Store any useful intermediate data in .temp/ (logs, analysis, state)
-8. **Report**: Briefly state what you did and what's next
+6. **Update tasks.md**: Move completed task to "Completed" with result. If no tasks left — generate new ones.
+7. **Update plan.md**: Mark completed plan items with `sed`. NEVER overwrite the entire plan.md.
+8. **End with a DETAILED summary**: List specifically what files were changed, what was built, what was tested. This summary is sent to Telegram.
+
+## ANTI-REPETITION RULE:
+- Before starting any task, READ .temp/tasks.md "Completed" section
+- NEVER repeat work that was already done
+- If you notice you're about to do something already in "Completed" — skip it and pick a different task
+- Each iteration must produce NEW, UNIQUE progress
 
 ## Decision Making:
 - If a task is unclear, analyze the project context (read files, check structure) and make the best decision
@@ -355,7 +460,8 @@ After implementing any feature, you MUST verify it works:
 # STATE MANAGEMENT
 
 Your working directory is .temp/ inside PROJECT_PATH. Use it for:
-- `plan.md` — the work plan (read and update every iteration)
+- `plan.md` — the USER's high-level work plan (read only, mark [x] with sed, NEVER overwrite)
+- `tasks.md` — YOUR detailed task list (you create, update, and manage this file)
 - `conversation.json` — auto-saved conversation history (don't modify)
 - `uploads/` — reference images (mockups, designs, screenshots) — you see them in the first message
 - `notes.md` — your working notes, observations, decisions
@@ -367,13 +473,13 @@ Your working directory is .temp/ inside PROJECT_PATH. Use it for:
 1. **BE AUTONOMOUS** — Make decisions and act. Don't hesitate or ask for clarification.
 2. **USE TOOLS** — Never just describe what should be done. Use tools to actually do it.
 3. **VERIFY EVERYTHING** — After any change, verify it worked (read file, run test, check output).
-4. **UPDATE THE PLAN** — After completing a task, immediately mark it done in plan.md.
+4. **MANAGE TASKS** — Maintain .temp/tasks.md as your working task list. Mark completed, add new ones. Update plan.md only with `sed` to mark [x]. NEVER overwrite plan.md.
 5. **HANDLE ERRORS** — Errors are expected. Diagnose, fix, retry. Track in .temp/errors.log.
-6. **STAY FOCUSED** — Follow the plan. Don't wander off into unrelated tasks.
+6. **NO REPETITION** — Before starting any work, check .temp/tasks.md "Completed" section. NEVER redo completed work. Each iteration MUST produce new unique progress.
 7. **BE THOROUGH** — Don't skip steps. If the plan says "write tests", write actual tests.
 8. **SAVE KNOWLEDGE** — If you solve a hard problem, create a skill for future reference.
-9. **REPORT PROGRESS** — End every iteration with a clear summary of what was done.
-10. **NEVER STOP** — Keep working forever. When all plan tasks are done, research new ideas (web_search, browse reference sites with rc-devtools), generate new improvement tasks, add them to plan.md, and execute them. There is ALWAYS something to improve, optimize, or add."""
+9. **DETAILED REPORTS** — End every iteration with a SPECIFIC summary: which files changed, what was built/fixed, test results. Not vague "made progress" — list concrete actions.
+10. **NEVER STOP, NEVER SAY DONE** — The project is NEVER finished. When tasks run out: search the web for new ideas and improvements (web_search), browse competitor sites via rc-devtools for inspiration, analyze code for optimizations, add new tasks to .temp/tasks.md, and execute them immediately. NEVER output phrases like "project is complete" or "all tasks done"."""
 
 
 def build_initial_message(plan_content: str, file_listing: str, image_blocks: list[dict] | None = None):
@@ -403,23 +509,48 @@ Report your progress after each action."""
     return text
 
 
+def read_tasks_file() -> str:
+    """Read .temp/tasks.md or return empty string if not found."""
+    tasks_path = os.path.join(config.TEMP_DIR, "tasks.md")
+    if os.path.exists(tasks_path):
+        try:
+            with open(tasks_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            pass
+    return ""
+
+
 def build_continuation_message(plan_content: str) -> str:
     """Build the continuation message for subsequent iterations."""
-    return f"""Continue your work. Here is the current plan:
+    tasks_content = read_tasks_file()
+    tasks_section = ""
+    if tasks_content:
+        tasks_section = f"""
 
-## Current Plan (.temp/plan.md):
+## Your Task List (.temp/tasks.md):
+{tasks_content}
+"""
+    else:
+        tasks_section = """
+
+## Your Task List (.temp/tasks.md):
+File not found. You MUST create it now with your first tasks based on the plan.
+"""
+
+    return f"""Continue your work.
+
+## User's Plan (.temp/plan.md):
 {plan_content}
+{tasks_section}
+Pick the next uncompleted task from tasks.md and execute it.
+After completing it, update tasks.md (move to Completed with result).
+If no tasks remain — generate new ones (search web, browse competitors, review code).
 
-Review the plan and continue with the next uncompleted task.
-
-If ALL tasks are marked [x] (complete), you MUST:
-1. Analyze the current project state — review code, run tests, check for issues
-2. Search the web (web_search) for new ideas, best practices, and improvements relevant to this project
-3. Browse competitor/reference sites using rc-devtools for inspiration
-4. Generate NEW tasks and add them to plan.md — improvements, optimizations, new features, better UX, tests, documentation
-5. Start executing the new tasks immediately
-
-NEVER stop working. There is ALWAYS something to improve, optimize, test, or add."""
+IMPORTANT:
+- Do NOT repeat work already in the "Completed" section
+- End with a DETAILED summary of what you did (files changed, what was built, test results)
+- NEVER say the project is finished — always find more to improve"""
 
 
 
@@ -464,12 +595,14 @@ async def run_agent():
         display.show_info("Available skills:")
         display.show_skills_list(skills_list)
 
-    display.show_info("Press [bold yellow]L[/bold yellow] for graceful stop (finishes current task), Ctrl+C for immediate stop")
+    display.show_info("Press [bold yellow]L[/bold yellow] for graceful stop, [bold cyan]Enter[/bold cyan] to send a message to the agent, [bold red]Ctrl+C[/bold red] for immediate stop")
 
     if config.TG_BOT_TOKEN:
         display.show_info("Telegram notifications: enabled")
+        telegram.init_polling()
+        display.show_info("Telegram /fix command: listening")
         mcp_server_names = list(mcp.sessions.keys()) if mcp.sessions else []
-        total_tools = builtin_count + mcp.get_tool_count() + 3 
+        total_tools = builtin_count + mcp.get_tool_count() + 3
         telegram.notify_start(
             config.AGENT_NAME, config.PROJECT_PATH, config.MODEL,
             mcp_servers=mcp_server_names, tools_count=total_tools, skills_count=len(skills_list),
@@ -512,8 +645,23 @@ async def run_agent():
 
             display.show_iteration_header(iteration)
 
+            pending = _take_pending_message()
+
+            tg_fixes = telegram.poll_fix_commands()
+            if tg_fixes and not pending:
+                pending = " | ".join(tg_fixes)
+                display.show_info(f"TG /fix received: [bold]{pending[:100]}[/bold]")
+
             if shutdown_mode:
                 user_msg = GRACEFUL_STOP_PROMPT
+            elif pending:
+                display.show_info(f"Injecting user message: [bold]{pending[:100]}[/bold]")
+                user_msg = f"""URGENT MESSAGE FROM THE OPERATOR (highest priority):
+
+{pending}
+
+Handle this request IMMEDIATELY before continuing with your regular tasks.
+After completing it, update .temp/tasks.md and continue with your normal workflow."""
             elif iteration == 1 and not agent.messages:
                 user_msg = build_initial_message(plan_content, file_listing, upload_images)
             else:
@@ -539,10 +687,22 @@ async def run_agent():
 
             agent.save_history(config.CONVERSATION_FILE)
 
-            summary = response_text[:500] if response_text else "(no response)"
+            summary = response_text[:800] if response_text else "(no response)"
+
+            tasks_content = read_tasks_file()
+            tasks_preview = ""
+            if tasks_content:
+                lines = tasks_content.split("\n")
+                current_tasks = [l.strip() for l in lines if l.strip().startswith("- [ ]")]
+                if current_tasks:
+                    tasks_preview = "\n".join(current_tasks[:5])
+                    if len(current_tasks) > 5:
+                        tasks_preview += f"\n... +{len(current_tasks) - 5} more"
+
             telegram.notify_iteration(
                 iteration, config.AGENT_NAME, summary,
                 tokens_in=stats.total_input_tokens, tokens_out=stats.total_output_tokens,
+                tasks_preview=tasks_preview,
             )
 
             if shutdown_mode:
@@ -727,6 +887,219 @@ Then an empty line, then the full skill content starting with the one-line descr
     display.show_skill_created(skill_name, len(content))
 
 
+def _pick_skill_interactive(skills_list: list[dict]) -> dict | None:
+    """
+    Interactive arrow-key skill picker using curses.
+    Returns selected skill dict or None on Escape/Ctrl+C/q.
+    """
+    if not skills_list:
+        return None
+
+    import curses
+
+    result = [None]
+
+    def _curses_main(stdscr):
+        curses.curs_set(0)
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_CYAN, -1)
+        curses.init_pair(2, curses.COLOR_WHITE, -1)
+        selected = 0
+
+        while True:
+            stdscr.clear()
+            h, w = stdscr.getmaxyx()
+            stdscr.addstr(0, 2, "Select a skill (↑/↓, Enter, q=cancel):", curses.A_BOLD)
+            stdscr.addstr(1, 0, "")
+
+            for i, skill in enumerate(skills_list):
+                if i + 2 >= h - 1:
+                    break
+                name = skill["name"]
+                desc = skill["description"][:w - len(name) - 10]
+                if i == selected:
+                    stdscr.addstr(i + 2, 2, f"▸ {name}", curses.color_pair(1) | curses.A_BOLD)
+                    stdscr.addstr(f"  — {desc}", curses.A_DIM)
+                else:
+                    stdscr.addstr(i + 2, 4, name, curses.color_pair(2))
+                    stdscr.addstr(f"  — {desc}", curses.A_DIM)
+
+            stdscr.refresh()
+
+            key = stdscr.getch()
+            if key == curses.KEY_UP:
+                selected = (selected - 1) % len(skills_list)
+            elif key == curses.KEY_DOWN:
+                selected = (selected + 1) % len(skills_list)
+            elif key in (curses.KEY_ENTER, 10, 13):
+                result[0] = skills_list[selected]
+                return
+            elif key in (27, ord("q")):  
+                result[0] = None
+                return
+
+    try:
+        curses.wrapper(_curses_main)
+    except Exception:
+        return None
+
+    return result[0]
+
+
+async def update_skill_mode():
+    """
+    Interactively select a skill, enter modification prompt, and update it via Claude.
+    """
+    from anthropic_client import _api_url, _headers, _parse_sse_response
+
+    display.show_banner(config.AGENT_NAME)
+    display.show_info("Update skill mode")
+
+    skills = SkillsManager(config.SKILLS_DIR)
+    skills_list = skills.list_skills()
+
+    if not skills_list:
+        display.show_warning("No skills found. Create one first with --create-skill")
+        return
+
+    display.show_info(f"Found {len(skills_list)} skill(s):")
+
+    selected = _pick_skill_interactive(skills_list)
+    if selected is None:
+        display.show_info("Cancelled.")
+        return
+
+    skill_name = selected["name"]
+    display.show_info(f"Selected: [bold]{skill_name}[/bold]")
+
+    current_content = skills.read_skill(skill_name)
+    display.show_info(f"Current size: {len(current_content):,} chars")
+
+    print()
+    try:
+        prompt = input("  📝 What do you want to change? > ")
+    except (KeyboardInterrupt, EOFError):
+        display.show_info("Cancelled.")
+        return
+
+    if not prompt.strip():
+        display.show_warning("Empty prompt. Cancelled.")
+        return
+
+    display.show_info(f"Updating skill '{skill_name}'...")
+
+    system_prompt = """You are an expert skill editor for an autonomous AI agent system.
+
+You will receive the CURRENT content of an existing skill file, and a modification request from the user.
+
+Your task is to apply the requested changes and return the COMPLETE updated skill content.
+
+RULES:
+1. Return ONLY the updated skill content — no explanations, no preamble, no "here's the updated version"
+2. The first line MUST remain a short one-line description
+3. Preserve the overall structure and quality of the skill
+4. Apply the requested changes precisely
+5. Keep the content in ENGLISH
+6. If asked to delete a section, remove it cleanly
+7. If asked to add content, integrate it naturally into the existing structure
+8. Return the FULL content, not just the changed parts"""
+
+    user_message = f"""## Current skill content ({skill_name}.md):
+
+{current_content}
+
+## Requested changes:
+
+{prompt}
+
+Apply the changes and return the COMPLETE updated skill file content."""
+
+    budget = max(config.MAX_TOKENS - 1024, 4096)
+    body = {
+        "model": config.MODEL,
+        "max_tokens": config.MAX_TOKENS,
+        "thinking": {"type": "enabled", "budget_tokens": budget},
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": user_message}],
+        "stream": True,
+    }
+
+    import httpx as _httpx
+    timeout = _httpx.Timeout(connect=30.0, read=None, write=30.0, pool=30.0)
+    http_client = _httpx.Client(timeout=timeout)
+
+    url = _api_url()
+    hdrs = _headers()
+
+    max_retries = 3
+    response = None
+    try:
+        for attempt in range(1, max_retries + 1):
+            try:
+                display.show_info(f"Attempt {attempt}/{max_retries}...")
+                with display.get_status_context("Updating skill (this may take a while)..."):
+                    with http_client.stream("POST", url, json=body, headers=hdrs) as resp:
+                        if resp.status_code != 200:
+                            error_body = resp.read().decode("utf-8", errors="replace")
+                            display.show_error(f"HTTP {resp.status_code}: {error_body[:1000]}")
+                            raise RuntimeError(f"HTTP {resp.status_code}: {error_body[:500]}")
+                        response = _parse_sse_response(resp)
+                break
+            except RuntimeError:
+                if attempt >= max_retries:
+                    display.show_error("All retries failed.")
+                    return
+                display.show_info("Retrying in 5 seconds...")
+                await asyncio.sleep(5)
+            except Exception as e:
+                display.show_error(f"Attempt {attempt}/{max_retries}: {type(e).__name__}: {e}")
+                if attempt < max_retries:
+                    display.show_info("Retrying in 5 seconds...")
+                    await asyncio.sleep(5)
+                else:
+                    display.show_error("All retries failed.")
+                    return
+    finally:
+        http_client.close()
+
+    if response is None:
+        return
+
+    for block in response.get("content", []):
+        if block.get("type") == "thinking" and config.SHOW_THINKING:
+            display.show_thinking(block.get("thinking", ""))
+
+    text_parts = []
+    for block in response.get("content", []):
+        if block.get("type") == "text":
+            text_parts.append(block.get("text", ""))
+
+    new_content = "\n".join(text_parts).strip()
+    if not new_content:
+        display.show_error("Empty response from API.")
+        return
+
+    result = skills.create_skill(skill_name, new_content)
+    display.show_info(result)
+
+    usage = response.get("usage", {})
+    inp_tokens = usage.get("input_tokens", 0)
+    out_tokens = usage.get("output_tokens", 0)
+    cost = (inp_tokens / 1_000_000) * 15.0 + (out_tokens / 1_000_000) * 75.0
+
+    if usage:
+        display.show_token_usage(inp_tokens, out_tokens)
+        display.show_info(f"Cost: ${cost:.4f}")
+
+    old_size = len(current_content)
+    new_size = len(new_content)
+    diff = new_size - old_size
+    diff_str = f"+{diff}" if diff >= 0 else str(diff)
+    display.show_info(f"Skill '{skill_name}' updated: {old_size:,} → {new_size:,} chars ({diff_str})")
+
+    skill_file = str(Path(config.SKILLS_DIR) / f"{skill_name}.md")
+    telegram.notify_skill_done(skill_name, new_size, f"Updated: {prompt[:200]}\n\n💰 ${cost:.4f}", skill_file)
+
 
 
 def main():
@@ -737,6 +1110,7 @@ def main():
 Examples:
   python bot.py                                      Run autonomous agent
   python bot.py --create-skill "REST API guide"      Create a new skill
+  python bot.py --update-skill                       Update an existing skill
         """,
     )
     parser.add_argument(
@@ -745,11 +1119,18 @@ Examples:
         metavar="DESCRIPTION",
         help="Create a new skill file with the given description",
     )
+    parser.add_argument(
+        "--update-skill",
+        action="store_true",
+        help="Interactively select and update an existing skill",
+    )
 
     args = parser.parse_args()
 
     if args.create_skill:
         asyncio.run(create_skill_mode(args.create_skill))
+    elif args.update_skill:
+        asyncio.run(update_skill_mode())
     else:
         asyncio.run(run_agent())
 

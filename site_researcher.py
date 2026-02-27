@@ -11,8 +11,6 @@ from urllib.parse import urlparse
 import display
 
 
-# System prompt for the research phase — tells the agent HOW to research a site
-# Uses rc-devtools MCP server as the browser
 RESEARCH_SYSTEM_PROMPT = """You are a web researcher analyzing a reference site.
 Your goal is to thoroughly explore this website and create a VERY detailed report.
 
