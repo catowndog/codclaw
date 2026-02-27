@@ -987,6 +987,7 @@ async def update_skill_mode():
         return
 
     display.show_info(f"Updating skill '{skill_name}'...")
+    telegram.notify_skill_start(f"Updating: {skill_name}\n\n{prompt[:300]}")
 
     system_prompt = """You are an expert skill editor for an autonomous AI agent system.
 
