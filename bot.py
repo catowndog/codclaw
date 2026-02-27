@@ -52,6 +52,8 @@ _original_term_settings = None
 _pending_user_message: str | None = None
 _input_queue: queue.Queue = queue.Queue()
 _stdin_thread: threading.Thread | None = None
+_pause_event = threading.Event()
+_pause_event.set()  
 
 
 def _stdin_reader_thread():
@@ -139,9 +141,11 @@ def _check_keypress() -> bool:
                 return True
             elif ch.lower() == "p" and not _stop_requested and not _pause_requested:
                 _pause_requested = True
+                _pause_event.clear() 
                 _show_pause_panel()
             elif ch.lower() == "r" and _pause_requested:
                 _pause_requested = False
+                _pause_event.set()  
                 display.show_info("Agent resumed!")
                 telegram.send("▶️ <b>Agent RESUMED</b>")
             elif ch in ("\r", "\n") and not _stop_requested:
@@ -650,14 +654,17 @@ IMPORTANT:
 
 
 async def _wait_if_paused():
-    """Async callback — blocks execution until pause is lifted.
+    """Blocks execution until pause is lifted.
 
-    Passed to run_turn() so tool calls and API requests pause immediately
-    when /pause is received from Telegram or P is pressed in console.
+    Uses threading.Event.wait() which TRULY BLOCKS the thread — freezes
+    the entire event loop. This is intentional: when paused, nothing should
+    execute. The TG poller thread (separate OS thread) will call
+    _pause_event.set() when /resume is received.
     """
-    while _pause_requested and not _stop_requested:
-        await asyncio.sleep(0.5)
-        _check_keypress()
+    if not _pause_event.is_set():
+        display.show_info("⏸ Paused — waiting for /resume or R key...")
+        _pause_event.wait()  
+        display.show_info("▶️ Resumed!")
 
 
 def _telegram_poller_thread():
@@ -676,9 +683,11 @@ def _telegram_poller_thread():
                 _show_stop_panel()
             if commands["pause"] and not _pause_requested:
                 _pause_requested = True
+                _pause_event.clear()  
                 _show_pause_panel()
             if commands["resume"] and _pause_requested:
                 _pause_requested = False
+                _pause_event.set()  
                 display.show_info("Agent resumed via Telegram!")
             for fix in commands["fixes"]:
                 if _pending_user_message is None:
@@ -747,8 +756,6 @@ async def run_agent():
     else:
         display.show_info("Telegram notifications: disabled (set TG_BOT_TOKEN + TG_USER_ID in .env)")
 
-    # Start Telegram poller in a REAL THREAD (not asyncio task)
-    # so /pause and /stop work even during long SSE streams
     if config.TG_BOT_TOKEN:
         _tg_thread = threading.Thread(target=_telegram_poller_thread, daemon=True, name="tg-poller")
         _tg_thread.start()

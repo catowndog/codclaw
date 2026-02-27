@@ -707,7 +707,6 @@ class LLMAgent:
 
     async def _execute_tool(self, tool_name: str, tool_args: dict) -> str:
         """Execute a tool call — route to built-in, MCP, or skills manager."""
-        # Check pause before ANY tool execution
         if getattr(self, '_check_pause', None):
             await self._check_pause()
 
@@ -733,6 +732,8 @@ class LLMAgent:
             for attempt in range(1, max_retries + 1):
                 try:
                     result = await self.mcp.call_tool(tool_name, tool_args)
+                    if getattr(self, '_check_pause', None):
+                        await self._check_pause()
                     if isinstance(result, str) and result.startswith("Error"):
                         raise RuntimeError(result)
                     if "screenshot" in tool_name:
