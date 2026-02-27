@@ -78,7 +78,7 @@ def notify_start(agent_name: str, project_path: str, model: str, mcp_servers: li
         f"🗄 DB: {db}\n"
         f"🌐 Reference sites: {refs}\n\n"
         f"🔌 MCP:\n{mcp_list}\n\n"
-        f"📱 Commands: /fix /stop /pause /resume"
+        f"📱 Commands: /fix /stop /pause /resume /ping /tasks /status"
     )
 
 
@@ -158,7 +158,7 @@ def _parse_updates_sync() -> dict:
     """Sync polling — fetch updates and parse all commands."""
     global _last_update_id
     if not config.TG_BOT_TOKEN or not config.TG_USER_ID:
-        return {"fixes": [], "stop": False, "pause": False, "resume": False}
+        return {"fixes": [], "stop": False, "pause": False, "resume": False, "ping": False, "tasks": False}
 
     url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/getUpdates"
     params = {"offset": _last_update_id + 1, "timeout": 0, "allowed_updates": ["message"]}
@@ -166,12 +166,12 @@ def _parse_updates_sync() -> dict:
     try:
         resp = httpx.get(url, params=params, timeout=5)
         if resp.status_code != 200:
-            return {"fixes": [], "stop": False, "pause": False, "resume": False}
+            return {"fixes": [], "stop": False, "pause": False, "resume": False, "ping": False, "tasks": False}
         data = resp.json()
         if not data.get("ok"):
-            return {"fixes": [], "stop": False, "pause": False, "resume": False}
+            return {"fixes": [], "stop": False, "pause": False, "resume": False, "ping": False, "tasks": False}
     except Exception:
-        return {"fixes": [], "stop": False, "pause": False, "resume": False}
+        return {"fixes": [], "stop": False, "pause": False, "resume": False, "ping": False, "tasks": False}
 
     return _parse_updates(data.get("result", []))
 
@@ -183,7 +183,7 @@ async def poll_commands_async() -> dict:
     """
     global _last_update_id
     if not config.TG_BOT_TOKEN or not config.TG_USER_ID:
-        return {"fixes": [], "stop": False, "pause": False, "resume": False}
+        return {"fixes": [], "stop": False, "pause": False, "resume": False, "ping": False, "tasks": False}
 
     url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/getUpdates"
     params = {"offset": _last_update_id + 1, "timeout": 0, "allowed_updates": ["message"]}
@@ -192,12 +192,12 @@ async def poll_commands_async() -> dict:
         async with httpx.AsyncClient(timeout=5) as client:
             resp = await client.get(url, params=params)
         if resp.status_code != 200:
-            return {"fixes": [], "stop": False, "pause": False, "resume": False}
+            return {"fixes": [], "stop": False, "pause": False, "resume": False, "ping": False, "tasks": False}
         data = resp.json()
         if not data.get("ok"):
-            return {"fixes": [], "stop": False, "pause": False, "resume": False}
+            return {"fixes": [], "stop": False, "pause": False, "resume": False, "ping": False, "tasks": False}
     except Exception:
-        return {"fixes": [], "stop": False, "pause": False, "resume": False}
+        return {"fixes": [], "stop": False, "pause": False, "resume": False, "ping": False, "tasks": False}
 
     return _parse_updates(data.get("result", []))
 
@@ -206,7 +206,7 @@ def _parse_updates(updates: list[dict]) -> dict:
     """Parse Telegram updates and return structured commands."""
     global _last_update_id
 
-    result = {"fixes": [], "stop": False, "pause": False, "resume": False}
+    result = {"fixes": [], "stop": False, "pause": False, "resume": False, "ping": False, "tasks": False}
 
     for update in updates:
         _last_update_id = update.get("update_id", _last_update_id)
@@ -235,7 +235,13 @@ def _parse_updates(updates: list[dict]) -> dict:
             result["resume"] = True
             send("▶️ <b>RESUME</b> command received — agent continuing.")
 
+        elif text == "/ping":
+            result["ping"] = True
+
+        elif text == "/tasks":
+            result["tasks"] = True
+
         elif text == "/status":
-            send("ℹ️ Agent is running. Use /stop /pause /resume /fix")
+            send("ℹ️ Agent is running.\n\n/stop /pause /resume /fix /ping /tasks")
 
     return result

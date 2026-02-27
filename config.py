@@ -59,6 +59,24 @@ TEMP_DIR: str = os.path.join(PROJECT_PATH, ".temp")
 PLAN_FILE: str = os.path.join(TEMP_DIR, "plan.md")
 CONVERSATION_FILE: str = os.path.join(TEMP_DIR, "conversation.json")
 
+# Global output log for /ping command — shared across all modules
+_output_log: list[str] = []
+_OUTPUT_LOG_MAX = 50
+
+
+def log_output(text: str):
+    """Append text to the global output log (used by /ping). Thread-safe enough."""
+    for line in text.strip().split("\n"):
+        if line.strip():
+            _output_log.append(line.strip())
+    while len(_output_log) > _OUTPUT_LOG_MAX:
+        _output_log.pop(0)
+
+
+def get_output_log(n: int = 20) -> list[str]:
+    """Get last N lines from output log."""
+    return _output_log[-n:]
+
 
 def validate() -> list[str]:
     errors = []

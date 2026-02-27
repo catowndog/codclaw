@@ -53,7 +53,7 @@ _pending_user_message: str | None = None
 _input_queue: queue.Queue = queue.Queue()
 _stdin_thread: threading.Thread | None = None
 _pause_event = threading.Event()
-_pause_event.set()  
+_pause_event.set()
 
 
 def _stdin_reader_thread():
@@ -61,14 +61,34 @@ def _stdin_reader_thread():
 
     Runs independently of the asyncio event loop so keypresses are captured
     even while the main loop is blocked on SSE streaming.
+
+    Handles R/P/L directly here because _check_keypress() can't run
+    while _pause_event.wait() blocks the event loop thread.
     """
+    global _stop_requested, _stop_shown, _pause_requested
     while True:
         try:
             ch = sys.stdin.read(1)
-            if ch:
-                _input_queue.put(ch)
-            else:
+            if not ch:
                 break
+            # Handle pause/resume/stop DIRECTLY in this thread
+            # because the main thread may be blocked on _pause_event.wait()
+            if ch.lower() == "r" and _pause_requested:
+                _pause_requested = False
+                _pause_event.set()
+                display.show_info("Agent resumed!")
+                telegram.send("▶️ <b>Agent RESUMED</b>")
+            elif ch.lower() == "p" and not _stop_requested and not _pause_requested:
+                _pause_requested = True
+                _pause_event.clear()
+                _show_pause_panel()
+            elif ch.lower() == "l" and not _stop_requested:
+                _stop_requested = True
+                _stop_shown = True
+                _pause_event.set()  # unblock pause if paused, so stop can proceed
+                _show_stop_panel()
+            else:
+                _input_queue.put(ch)
         except Exception:
             break
 
@@ -653,6 +673,44 @@ IMPORTANT:
 
 
 
+def _handle_ping():
+    """Send last 20 lines of agent output to Telegram."""
+    lines = config.get_output_log(20)
+    if not lines:
+        telegram.send("📡 <b>Ping:</b> no output yet")
+        return
+    text = "\n".join(lines)
+    telegram.send(f"📡 <b>Ping — last {len(lines)} lines:</b>\n\n<pre>{text[:3500]}</pre>")
+
+
+def _handle_tasks():
+    """Send current tasks + what agent is doing now to Telegram."""
+    parts = []
+
+    # Current activity from output log
+    last_lines = config.get_output_log(5)
+    if last_lines:
+        activity = "\n".join(last_lines)
+        parts.append(f"🔨 <b>Now doing:</b>\n<pre>{activity[:500]}</pre>")
+
+    # Tasks from tasks.md
+    tasks_path = os.path.join(config.TEMP_DIR, "tasks.md")
+    if os.path.exists(tasks_path):
+        try:
+            with open(tasks_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            if content.strip():
+                parts.append(f"📋 <b>Tasks:</b>\n<pre>{content[:2500]}</pre>")
+            else:
+                parts.append("📋 <b>Tasks:</b> file is empty")
+        except Exception as e:
+            parts.append(f"📋 <b>Tasks:</b> error: {e}")
+    else:
+        parts.append("📋 <b>Tasks:</b> no tasks.md yet")
+
+    telegram.send("\n\n".join(parts) if parts else "📋 No data yet")
+
+
 async def _wait_if_paused():
     """Blocks execution until pause is lifted.
 
@@ -689,6 +747,10 @@ def _telegram_poller_thread():
                 _pause_requested = False
                 _pause_event.set()  
                 display.show_info("Agent resumed via Telegram!")
+            if commands.get("ping"):
+                _handle_ping()
+            if commands.get("tasks"):
+                _handle_tasks()
             for fix in commands["fixes"]:
                 if _pending_user_message is None:
                     _pending_user_message = fix
@@ -763,8 +825,13 @@ async def run_agent():
     stats = TokenStats(model=config.get_model())
     agent = LLMAgent(mcp_manager=mcp, skills_manager=skills, builtin_tools=builtin, token_stats=stats)
 
+    # Setup terminal + input thread EARLY so P/R/L work during research phase
+    _setup_terminal()
+    _start_stdin_thread()
+
     if config.REFERENCE_SITES:
-        await research_sites(agent, config.REFERENCE_SITES, config.TEMP_DIR)
+        await research_sites(agent, config.REFERENCE_SITES, config.TEMP_DIR,
+                             check_interrupt=_check_keypress, check_pause=_wait_if_paused)
 
     if os.path.exists(config.CONVERSATION_FILE):
         if agent.load_history(config.CONVERSATION_FILE):
@@ -786,9 +853,6 @@ async def run_agent():
     iteration = 1
     shutdown_mode = False
 
-    _setup_terminal()
-    _start_stdin_thread()
-
     _original_sigint = signal.getsignal(signal.SIGINT)
     def _sigint_handler(signum, frame):
         raise KeyboardInterrupt
@@ -805,6 +869,7 @@ async def run_agent():
                 _check_keypress()
 
             display.show_iteration_header(iteration)
+            config.log_output(f"--- Iteration #{iteration} ---")
 
             pending = _take_pending_message()
 
@@ -843,6 +908,9 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
                 continue
 
             agent.save_history(config.CONVERSATION_FILE)
+
+            if response_text:
+                config.log_output(response_text)
 
             summary = response_text[:800] if response_text else "(no response)"
             work_desc = _extract_work_description(response_text)

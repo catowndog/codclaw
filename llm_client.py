@@ -573,17 +573,38 @@ class LLMAgent:
             return await self._call_api_openai(system, tools)
         return await self._call_api_anthropic(system, tools)
 
+    def _calc_safe_max_tokens(self, system: str, tools: list[dict]) -> int:
+        """Calculate safe max_tokens that fits within the model's context window.
+
+        Estimates input size (messages + system + tools) and caps output tokens
+        so total doesn't exceed context_window.
+        """
+        context_window = self._get_context_window()
+        # Estimate input tokens
+        input_estimate = self._estimate_tokens()
+        input_estimate += len(system) // 4  # system prompt
+        if tools:
+            input_estimate += len(json.dumps(tools)) // 4  # tool definitions
+        # Reserve space: input + output + 2K safety margin
+        available = context_window - input_estimate - 2000
+        safe = min(config.MAX_TOKENS, max(available, 4096))
+        if safe < config.MAX_TOKENS:
+            display.show_info(f"Auto-adjusted max_tokens: {config.MAX_TOKENS:,} → {safe:,} (input ~{input_estimate:,} tokens, context {context_window:,})")
+        return safe
+
     async def _call_api_anthropic(self, system: str, tools: list[dict]) -> dict:
         """Make an async streaming Anthropic API call."""
+        safe_max_tokens = self._calc_safe_max_tokens(system, tools)
+
         body: dict[str, Any] = {
             "model": config.get_model(),
-            "max_tokens": config.MAX_TOKENS,
+            "max_tokens": safe_max_tokens,
             "system": system,
             "messages": self.messages,
             "stream": True,
         }
 
-        budget = max(config.MAX_TOKENS - 1024, 4096)
+        budget = max(safe_max_tokens - 1024, 4096)
         body["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
         if tools:
@@ -633,12 +654,13 @@ class LLMAgent:
         Converts messages and tools to OpenAI format, makes the request,
         and converts the response back to our internal Anthropic-like format.
         """
+        safe_max_tokens = self._calc_safe_max_tokens(system, tools)
         openai_messages = _convert_messages_to_openai(self.messages, system)
         openai_tools = _convert_tools_to_openai(tools) if tools else None
 
         body: dict[str, Any] = {
             "model": config.get_model(),
-            "max_tokens": config.MAX_TOKENS,
+            "max_tokens": safe_max_tokens,
             "messages": openai_messages,
             "stream": True,
         }
@@ -711,6 +733,10 @@ class LLMAgent:
             await self._check_pause()
 
         import telegram
+        # Log to output buffer for /ping
+        args_preview = json.dumps(tool_args, ensure_ascii=False)[:150] if tool_args else ""
+        config.log_output(f"🔧 {tool_name}: {args_preview}")
+
         args_str = json.dumps(tool_args, ensure_ascii=False)[:200] if tool_args else ""
         if not any(skip in tool_name for skip in self._TG_SKIP_TOOLS):
             telegram.notify_tool_call(tool_name, args_str)
@@ -737,10 +763,24 @@ class LLMAgent:
                     if isinstance(result, str) and result.startswith("Error"):
                         raise RuntimeError(result)
                     if "screenshot" in tool_name:
-                        self._send_screenshot_to_tg(tool_args, result)
-                        self._auto_save_screenshot(tool_args, result)
+                        try:
+                            self._send_screenshot_to_tg(tool_args, result)
+                            self._auto_save_screenshot(tool_args, result)
+                        except Exception as save_err:
+                            display.show_warning(f"Screenshot save/send failed: {save_err}")
+                            if attempt < max_retries:
+                                display.show_info("Retrying MCP call to get fresh screenshot...")
+                                await asyncio.sleep(1)
+                                continue  # retry the whole MCP call
                     if "get_snapshot" in tool_name:
-                        self._auto_save_snapshot(tool_args, result)
+                        try:
+                            self._auto_save_snapshot(tool_args, result)
+                        except Exception as save_err:
+                            display.show_warning(f"Snapshot save failed: {save_err}")
+                            if attempt < max_retries:
+                                display.show_info("Retrying MCP call to get fresh snapshot...")
+                                await asyncio.sleep(1)
+                                continue
                     return result
                 except Exception as e:
                     last_error = e
@@ -755,77 +795,93 @@ class LLMAgent:
         return f"Unknown tool: {tool_name}"
 
     def _send_screenshot_to_tg(self, tool_args: dict, result: str):
+        """Send screenshot to Telegram. Retries up to 2 times on failure."""
         import telegram, base64, os
 
-        file_path = tool_args.get("filePath", "") or tool_args.get("file_path", "")
-        if file_path:
-            abs_path = os.path.join(config.PROJECT_PATH, file_path) if not os.path.isabs(file_path) else file_path
-            if os.path.isfile(abs_path):
-                try:
-                    with open(abs_path, "rb") as f:
-                        telegram.send_photo_bytes(f.read(), f"📸 {os.path.basename(abs_path)}")
-                    return
-                except Exception:
-                    pass
+        for attempt in range(1, 3):
+            try:
+                file_path = tool_args.get("filePath", "") or tool_args.get("file_path", "")
+                if file_path:
+                    abs_path = os.path.join(config.PROJECT_PATH, file_path) if not os.path.isabs(file_path) else file_path
+                    if os.path.isfile(abs_path):
+                        with open(abs_path, "rb") as f:
+                            if telegram.send_photo_bytes(f.read(), f"📸 {os.path.basename(abs_path)}"):
+                                return
 
-        if self.mcp:
-            raw = getattr(self.mcp, '_last_binary_data', None)
-            if raw:
-                try:
-                    img = base64.b64decode(raw) if isinstance(raw, str) else raw
-                    telegram.send_photo_bytes(img, "📸 Screenshot")
-                    return
-                except Exception:
-                    pass
+                if self.mcp:
+                    raw = getattr(self.mcp, '_last_binary_data', None)
+                    if raw:
+                        img = base64.b64decode(raw) if isinstance(raw, str) else raw
+                        if telegram.send_photo_bytes(img, "📸 Screenshot"):
+                            return
 
-        if isinstance(result, str):
-            import re
-            for pattern in [r'data:image/[^;]+;base64,([A-Za-z0-9+/=]+)', r'([A-Za-z0-9+/=]{500,})']:
-                match = re.search(pattern, result)
-                if match:
-                    try:
-                        data = match.group(1) if match.lastindex else match.group(0)
-                        telegram.send_photo_bytes(base64.b64decode(data), "📸 Screenshot")
-                        return
-                    except Exception:
-                        pass
+                if isinstance(result, str):
+                    import re
+                    for pattern in [r'data:image/[^;]+;base64,([A-Za-z0-9+/=]+)', r'([A-Za-z0-9+/=]{500,})']:
+                        match = re.search(pattern, result)
+                        if match:
+                            data = match.group(1) if match.lastindex else match.group(0)
+                            if telegram.send_photo_bytes(base64.b64decode(data), "📸 Screenshot"):
+                                return
+                # If we got here, no data source worked — not an error, just no data
+                return
+            except Exception as e:
+                display.show_warning(f"Failed to send screenshot to TG (attempt {attempt}/2): {e}")
 
     def _auto_save_snapshot(self, tool_args: dict, result: str):
-        """Auto-save DOM snapshot text to .temp/references/snapshots/."""
+        """Auto-save DOM snapshot text to .temp/references/snapshots/. Retries up to 2 times."""
         if not result or not isinstance(result, str) or result.startswith("Error"):
             return
-        try:
-            import time as _time
-            snapshots_dir = os.path.join(config.TEMP_DIR, "references", "snapshots")
-            os.makedirs(snapshots_dir, exist_ok=True)
-            timestamp = _time.strftime("%Y%m%d-%H%M%S")
-            filename = f"snapshot-{timestamp}.txt"
-            filepath = os.path.join(snapshots_dir, filename)
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(result)
-            display.show_info(f"Snapshot auto-saved: {filepath}")
-        except Exception as e:
-            display.show_warning(f"Failed to auto-save snapshot: {e}")
+        for attempt in range(1, 3):
+            try:
+                import time as _time
+                snapshots_dir = os.path.join(config.TEMP_DIR, "references", "snapshots")
+                os.makedirs(snapshots_dir, exist_ok=True)
+                timestamp = _time.strftime("%Y%m%d-%H%M%S")
+                filename = f"snapshot-{timestamp}.txt"
+                filepath = os.path.join(snapshots_dir, filename)
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(result)
+                display.show_info(f"Snapshot auto-saved: {filepath}")
+                return  # success
+            except Exception as e:
+                display.show_warning(f"Failed to save snapshot (attempt {attempt}/2): {e}")
 
     def _auto_save_screenshot(self, tool_args: dict, result: str):
-        """Auto-save screenshot binary data to .temp/references/screenshots/."""
-        import base64
-        try:
-            import time as _time
-            raw = getattr(self.mcp, '_last_binary_data', None) if self.mcp else None
-            if not raw:
-                return
-            screenshots_dir = os.path.join(config.TEMP_DIR, "references", "screenshots")
-            os.makedirs(screenshots_dir, exist_ok=True)
-            timestamp = _time.strftime("%Y%m%d-%H%M%S")
-            filename = f"screenshot-{timestamp}.png"
-            filepath = os.path.join(screenshots_dir, filename)
-            img = base64.b64decode(raw) if isinstance(raw, str) else raw
-            with open(filepath, "wb") as f:
-                f.write(img)
-            display.show_info(f"Screenshot auto-saved: {filepath}")
-        except Exception as e:
-            display.show_warning(f"Failed to auto-save screenshot: {e}")
+        """Auto-save screenshot binary data to .temp/references/screenshots/. Retries up to 2 times."""
+        import base64, re
+        for attempt in range(1, 3):
+            try:
+                import time as _time
+                raw = getattr(self.mcp, '_last_binary_data', None) if self.mcp else None
+
+                # If no binary data from MCP, try to extract base64 from result text
+                if not raw and isinstance(result, str):
+                    # Try data:image URI
+                    m = re.search(r'data:image/[^;]+;base64,([A-Za-z0-9+/=]+)', result)
+                    if m:
+                        raw = m.group(1)
+                    else:
+                        # Try raw base64 blob (500+ chars)
+                        m = re.search(r'([A-Za-z0-9+/=]{500,})', result)
+                        if m:
+                            raw = m.group(1)
+
+                if not raw:
+                    return  # silently skip — no screenshot data available
+
+                screenshots_dir = os.path.join(config.TEMP_DIR, "references", "screenshots")
+                os.makedirs(screenshots_dir, exist_ok=True)
+                timestamp = _time.strftime("%Y%m%d-%H%M%S")
+                filename = f"screenshot-{timestamp}.png"
+                filepath = os.path.join(screenshots_dir, filename)
+                img = base64.b64decode(raw) if isinstance(raw, str) else raw
+                with open(filepath, "wb") as f:
+                    f.write(img)
+                display.show_info(f"Screenshot auto-saved: {filepath}")
+                return  # success
+            except Exception as e:
+                display.show_warning(f"Failed to save screenshot (attempt {attempt}/2): {e}")
 
     def _process_response(self, response: dict) -> dict:
         """Process response content blocks and display them."""
@@ -849,6 +905,7 @@ class LLMAgent:
                 if text.strip():
                     result["text_parts"].append(text)
                     display.show_text_response(text)
+                    config.log_output(f"💬 {text.strip()[:200]}")
 
             elif bt == "tool_use":
                 tc = {"id": block.get("id", ""), "name": block.get("name", ""), "input": block.get("input", {})}
@@ -891,6 +948,12 @@ class LLMAgent:
                 await check_pause()
 
             if self._should_compress():
+                await self._compress_history(system)
+
+            # Force compression if max_tokens would be too small
+            safe = self._calc_safe_max_tokens(system, tools)
+            if safe < 8192 and len(self.messages) > KEEP_RECENT_MESSAGES + 2:
+                display.show_warning(f"Input too large — safe_max_tokens={safe:,}, forcing compression...")
                 await self._compress_history(system)
 
             response = await self._call_api(system, tools)

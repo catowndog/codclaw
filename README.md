@@ -7,21 +7,21 @@ A fully autonomous AI agent that executes tasks from a plan file, using shell co
 
 ## ✨ Features
 
-| Feature                    | Description                                                                               |
-| -------------------------- | ----------------------------------------------------------------------------------------- |
-| **Autonomous Loop**        | Reads `.temp/plan.md`, executes tasks, updates progress — no human input needed            |
-| **Infinite Work Mode**     | When all tasks done — researches new ideas via web, generates new tasks, keeps improving   |
-| **Raw HTTP API**           | No SDK — direct SSE streaming to Anthropic-compatible proxy                                |
-| **Built-in Tools**         | Shell, SQL (PostgreSQL/MySQL/SQLite/MongoDB), file ops, HTTP, web search                   |
-| **MCP Servers**            | rc-devtools browser, filesystem, postgres — with `${VAR}` template support                 |
-| **Skills System**          | Reusable `.md` knowledge files — create, update, or auto-create during agent work          |
-| **Reference Sites**        | Auto-crawl analog sites before starting, save detailed reports                             |
-| **Auto-save Snapshots**    | Screenshots and DOM snapshots auto-saved to `.temp/references/` on every MCP call          |
-| **Telegram Notifications** | Start/stop, iterations, tool calls (filtered), screenshots, errors, skill files            |
-| **Context Compression**    | Auto-summarize old messages when approaching token limit                                   |
-| **Graceful Stop**          | Press `L` — agent receives wrap-up prompt, commits WIP, updates plan, then exits           |
-| **Token Stats**            | Cost tracking with periodic reports every 5 minutes                                        |
-| **Upload Images**          | Place mockups in `.temp/uploads/` — agent sees them at startup                             |
+| Feature                    | Description                                                                              |
+| -------------------------- | ---------------------------------------------------------------------------------------- |
+| **Autonomous Loop**        | Reads `.temp/plan.md`, executes tasks, updates progress — no human input needed          |
+| **Infinite Work Mode**     | When all tasks done — researches new ideas via web, generates new tasks, keeps improving |
+| **Raw HTTP API**           | No SDK — direct SSE streaming to Anthropic-compatible proxy                              |
+| **Built-in Tools**         | Shell, SQL (PostgreSQL/MySQL/SQLite/MongoDB), file ops, HTTP, web search                 |
+| **MCP Servers**            | rc-devtools browser, filesystem, postgres — with `${VAR}` template support               |
+| **Skills System**          | Reusable `.md` knowledge files — create, update, or auto-create during agent work        |
+| **Reference Sites**        | Auto-crawl analog sites before starting, save detailed reports                           |
+| **Auto-save Snapshots**    | Screenshots and DOM snapshots auto-saved to `.temp/references/` on every MCP call        |
+| **Telegram Notifications** | Start/stop, iterations, tool calls (filtered), screenshots, errors, skill files          |
+| **Context Compression**    | Auto-summarize old messages when approaching token limit                                 |
+| **Graceful Stop**          | Press `L` — agent receives wrap-up prompt, commits WIP, updates plan, then exits         |
+| **Token Stats**            | Cost tracking with periodic reports every 5 minutes                                      |
+| **Upload Images**          | Place mockups in `.temp/uploads/` — agent sees them at startup                           |
 
 ## 🚀 Quick Start
 
@@ -198,17 +198,17 @@ PROJECT_PATH/.temp/       # Agent working directory
 
 ## ⌨️ Controls
 
-| Input              | Action                                                                  |
-| ------------------ | ----------------------------------------------------------------------- |
-| `Enter`            | Send a message to the agent — injected as priority task next iteration  |
-| `L`                | Graceful stop — instant feedback, agent wraps up in 3-5 min            |
-| `P`                | Pause the agent — freezes iteration loop                                |
-| `R`                | Resume — continue after pause                                           |
-| `Ctrl+C`           | Immediate stop (saves state)                                            |
-| TG: `/fix <msg>`   | Send a fix request via Telegram — same as Enter but from your phone     |
-| TG: `/stop`        | Graceful stop — same as pressing L                                      |
-| TG: `/pause`       | Pause the agent                                                         |
-| TG: `/resume`      | Resume after pause                                                      |
+| Input            | Action                                                                 |
+| ---------------- | ---------------------------------------------------------------------- |
+| `Enter`          | Send a message to the agent — injected as priority task next iteration |
+| `L`              | Graceful stop — instant feedback, agent wraps up in 3-5 min            |
+| `P`              | Pause the agent — freezes iteration loop                               |
+| `R`              | Resume — continue after pause                                          |
+| `Ctrl+C`         | Immediate stop (saves state)                                           |
+| TG: `/fix <msg>` | Send a fix request via Telegram — same as Enter but from your phone    |
+| TG: `/stop`      | Graceful stop — same as pressing L                                     |
+| TG: `/pause`     | Pause the agent                                                        |
+| TG: `/resume`    | Resume after pause                                                     |
 
 **Note:** Keyboard input works even during streaming (dedicated background thread).
 
@@ -226,3 +226,7 @@ MongoDB uses JSON queries: `{"collection":"users","action":"find","filter":{}}`
 ## 📄 License
 
 MIT
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=catowndog/codclaw&type=date&legend=top-left)](https://www.star-history.com/#catowndog/codclaw&type=date&legend=top-left)

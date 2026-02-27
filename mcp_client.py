@@ -181,11 +181,20 @@ class MCPManager:
                 parts = []
                 self._last_binary_data = None
                 for item in result.content:
-                    if hasattr(item, "text"):
-                        parts.append(item.text)
-                    elif hasattr(item, "data"):
+                    if hasattr(item, "data") and item.data:
                         self._last_binary_data = item.data
                         parts.append(f"[binary data: {len(item.data)} bytes]")
+                    elif hasattr(item, "text"):
+                        text = item.text or ""
+                        parts.append(text)
+                        # Detect base64 image in text (some MCP servers return screenshots as base64 text)
+                        if not self._last_binary_data and len(text) > 500:
+                            import re as _re
+                            _m = _re.search(r'data:image/[^;]+;base64,([A-Za-z0-9+/=]{100,})', text)
+                            if _m:
+                                self._last_binary_data = _m.group(1)
+                            elif _re.match(r'^[A-Za-z0-9+/=]{500,}$', text.strip()):
+                                self._last_binary_data = text.strip()
                     else:
                         parts.append(str(item))
                 return "\n".join(parts)
