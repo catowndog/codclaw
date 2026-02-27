@@ -660,12 +660,17 @@ async def _wait_if_paused():
         _check_keypress()
 
 
-async def _telegram_poller():
-    """Background asyncio task — polls Telegram for commands every 2 seconds."""
+def _telegram_poller_thread():
+    """Background THREAD that polls Telegram for commands every 2 seconds.
+
+    Runs in a real OS thread (not asyncio task) so it works even when
+    the event loop is blocked on a long HTTP stream (SSE, MCP call).
+    This is critical for /pause and /stop to work immediately.
+    """
     global _stop_requested, _pause_requested, _pending_user_message
     while True:
         try:
-            commands = await telegram.poll_commands_async()
+            commands = telegram.poll_commands_sync()
             if commands["stop"] and not _stop_requested:
                 _stop_requested = True
                 _show_stop_panel()
@@ -683,7 +688,7 @@ async def _telegram_poller():
                 display.show_info(f"TG /fix received: [bold]{fix[:100]}[/bold]")
         except Exception:
             pass
-        await asyncio.sleep(2)
+        time.sleep(2)
 
 
 async def run_agent():
@@ -742,9 +747,11 @@ async def run_agent():
     else:
         display.show_info("Telegram notifications: disabled (set TG_BOT_TOKEN + TG_USER_ID in .env)")
 
-    tg_poller_task = None
+    # Start Telegram poller in a REAL THREAD (not asyncio task)
+    # so /pause and /stop work even during long SSE streams
     if config.TG_BOT_TOKEN:
-        tg_poller_task = asyncio.create_task(_telegram_poller())
+        _tg_thread = threading.Thread(target=_telegram_poller_thread, daemon=True, name="tg-poller")
+        _tg_thread.start()
 
     stats = TokenStats(model=config.get_model())
     agent = LLMAgent(mcp_manager=mcp, skills_manager=skills, builtin_tools=builtin, token_stats=stats)
@@ -879,8 +886,6 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
         display.show_shutdown()
 
     finally:
-        if tg_poller_task is not None:
-            tg_poller_task.cancel()
         signal.signal(signal.SIGINT, _original_sigint)
         _restore_terminal()
         display.show_stats(stats.format_summary())

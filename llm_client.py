@@ -845,8 +845,9 @@ class LLMAgent:
 
             elif bt == "text":
                 text = block.get("text", "")
-                result["text_parts"].append(text)
-                display.show_text_response(text)
+                if text.strip():
+                    result["text_parts"].append(text)
+                    display.show_text_response(text)
 
             elif bt == "tool_use":
                 tc = {"id": block.get("id", ""), "name": block.get("name", ""), "input": block.get("input", {})}

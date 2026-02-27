@@ -146,6 +146,14 @@ def poll_fix_commands() -> list[str]:
     return result.get("fixes", [])
 
 
+def poll_commands_sync() -> dict:
+    """Sync polling — returns all commands. Thread-safe.
+
+    Returns: {"fixes": [...], "stop": bool, "pause": bool, "resume": bool}
+    """
+    return _parse_updates_sync()
+
+
 def _parse_updates_sync() -> dict:
     """Sync polling — fetch updates and parse all commands."""
     global _last_update_id
