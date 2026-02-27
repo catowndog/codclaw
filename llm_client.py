@@ -850,7 +850,6 @@ class LLMAgent:
                         if getattr(self, '_check_pause', None):
                             await self._check_pause()
 
-            # All retries failed — try to reconnect the MCP server and retry once
             server_name = self.mcp.get_server_for_tool(tool_name)
             if server_name:
                 reconnected = await self.mcp.reconnect_server(server_name)
@@ -1091,7 +1090,6 @@ class LLMAgent:
 
             stop_reason = response.get("stop_reason")
 
-            # All tool calls were broken (empty input from max_tokens truncation) — retry
             if dropped_tool_names and not valid_tool_calls and stop_reason == "tool_use":
                 display.show_warning("All tool calls had empty input — requesting retry...")
                 self.messages.append({"role": "assistant", "content": response["content"]})

@@ -167,7 +167,7 @@ class MCPManager:
         self.sessions: dict[str, ClientSession] = {}
         self.server_tools: dict[str, list] = {}
         self.tool_routing: dict[str, tuple[str, str]] = {}
-        self._server_configs: dict[str, dict] = {}  # saved for reconnect
+        self._server_configs: dict[str, dict] = {} 
 
     async def connect_all(self) -> None:
         """
@@ -211,17 +211,13 @@ class MCPManager:
 
         display.show_info(f"🔄 Reconnecting MCP server '{server_name}'...")
 
-        # Close old session if it exists
         old_session = self.sessions.pop(server_name, None)
         if old_session:
             try:
-                # Can't easily close individual sessions from exit_stack,
-                # but removing from sessions dict prevents further use
                 pass
             except Exception:
                 pass
 
-        # Remove old tool routing for this server
         to_remove = [k for k, (sn, _) in self.tool_routing.items() if sn == server_name]
         for k in to_remove:
             del self.tool_routing[k]
@@ -242,7 +238,7 @@ class MCPManager:
         - Linux: starts Xvfb virtual display, browser runs on invisible screen
         - macOS/Windows: injects --headless flag so browser runs without a window
         """
-        self._server_configs[name] = config  # save for reconnect
+        self._server_configs[name] = config  
 
         command = config.get("command", "")
         args = list(config.get("args", []))

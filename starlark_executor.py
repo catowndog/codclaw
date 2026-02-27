@@ -115,15 +115,12 @@ def _try_fix_syntax(code: str, error: SyntaxError) -> str | None:
     """
     msg = str(error.msg) if error.msg else ""
 
-    # Fix: unterminated string literal — LLM split a string across lines
-    # Convert single/double quoted strings that span multiple lines to triple-quoted
     if "unterminated string literal" in msg:
         lines = code.split("\n")
         fixed_lines = []
         i = 0
         while i < len(lines):
             line = lines[i]
-            # Check if this line has an unclosed string
             try:
                 ast.parse(line.strip(), mode="eval")
                 fixed_lines.append(line)
@@ -132,7 +129,6 @@ def _try_fix_syntax(code: str, error: SyntaxError) -> str | None:
             except SyntaxError:
                 pass
 
-            # Find unclosed quote on this line
             in_str = None
             for ci, ch in enumerate(line):
                 if ch in ('"', "'") and (ci == 0 or line[ci - 1] != '\\'):
@@ -142,18 +138,14 @@ def _try_fix_syntax(code: str, error: SyntaxError) -> str | None:
                         in_str = ch
 
             if in_str is not None:
-                # Collect continuation lines until we find the closing quote
                 combined = line
                 j = i + 1
                 found_close = False
                 while j < len(lines):
                     combined += "\n" + lines[j]
-                    # Check if this line closes the string
                     if in_str in lines[j]:
                         found_close = True
-                        # Replace the opening quote with triple quote
                         triple = in_str * 3
-                        # Find the position of the opening unclosed quote
                         pos = None
                         temp_in = None
                         for ci, ch in enumerate(line):
@@ -165,7 +157,6 @@ def _try_fix_syntax(code: str, error: SyntaxError) -> str | None:
                                     pos = ci
                         if pos is not None:
                             new_line = line[:pos] + triple + line[pos + 1:]
-                            # Find and replace closing quote in the last line
                             close_line = lines[j]
                             close_pos = close_line.find(in_str)
                             if close_pos >= 0:
@@ -182,7 +173,6 @@ def _try_fix_syntax(code: str, error: SyntaxError) -> str | None:
                             break
                     j += 1
                 if not found_close:
-                    # Can't fix — just close the string on same line
                     fixed_lines.append(line + in_str)
                     i += 1
             else:
@@ -305,7 +295,6 @@ class StarlarkExecutor:
         try:
             tree = ast.parse(code, mode="exec")
         except SyntaxError as e:
-            # Try to fix common LLM mistakes and re-parse
             fixed = _try_fix_syntax(code, e)
             if fixed and fixed != code:
                 try:
@@ -581,7 +570,6 @@ class StarlarkExecutor:
                 try:
                     return value[idx]
                 except TypeError:
-                    # e.g. string indexed with str key — LLM expected dict but got string
                     val_type = type(value).__name__
                     val_preview = str(value)[:200]
                     raise _StarlarkError(
