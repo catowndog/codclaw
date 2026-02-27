@@ -15,12 +15,22 @@ Uses Python's ast module to parse and interpret a safe subset:
 - Comparisons and boolean logic (and, or, not)
 - Print (captured to output log)
 - Integer/float literals and basic arithmetic
+
+Built-in utility functions:
+- send_message(text) — send real-time message to user during execution
+- output(value) / output("name", value) — explicit result publication (suppresses tool results)
+- sleep(seconds) — async pause (max 30s)
+- set_var("name", value) / get_var("name") — persist variables between code blocks
+- get_result(ref_id, offset, limit) — retrieve cached large results
+- json_loads(s) / json_dumps(v) — JSON parsing
 """
 
 import ast
 import re
 import asyncio
 import json
+import hashlib
+import time
 from typing import Any, Callable, Awaitable
 
 
@@ -63,6 +73,10 @@ _SAFE_LIST_METHODS = {"append", "extend", "insert", "pop", "remove", "sort", "re
 
 _SAFE_DICT_METHODS = {"get", "keys", "values", "items", "update", "pop", "setdefault", "copy", "clear"}
 
+# Threshold for caching large tool results (chars)
+_RESULT_CACHE_THRESHOLD = 10_000
+_RESULT_CACHE_PREVIEW = 2_000
+
 
 def extract_starlark_blocks(text: str) -> list[str]:
     """Extract ```starlark code blocks from LLM text response.
@@ -74,24 +88,69 @@ def extract_starlark_blocks(text: str) -> list[str]:
     return [m.strip() for m in matches if m.strip()]
 
 
+def _sanitize_code(code: str) -> str:
+    """Sanitize LLM-generated code before parsing.
+
+    Fixes common issues:
+    - Strips markdown artifacts (leading/trailing ```)
+    - Fixes invalid escape sequences that LLMs sometimes generate
+    - Removes null bytes
+    """
+    # Remove null bytes
+    code = code.replace("\x00", "")
+
+    # Strip any remaining markdown fence markers
+    code = re.sub(r'^```\w*\s*\n?', '', code)
+    code = re.sub(r'\n?```\s*$', '', code)
+
+    # Fix common invalid escape sequences in regular strings (not f-strings)
+    # LLMs sometimes write \n, \t inside regular strings that Python treats as escapes
+    # but they also write intentional ones — so we only fix truly invalid ones
+    # Replace \p, \d, \w etc. (regex chars) that aren't valid Python escapes
+    invalid_escapes = re.compile(r'(?<!\\)\\([^\\\'\"abfnrtvx0-9uUN\n])')
+    code = invalid_escapes.sub(r'\\\\\1', code)
+
+    return code
+
+
 class StarlarkExecutor:
     """
     Restricted AST-based executor for Starlark-like code.
 
     Tool functions are registered and called asynchronously.
     All other operations are sandboxed — no imports, no exec, no file access.
+
+    Extended features (from Scripted Tool Execution architecture):
+    - send_message(text) — real-time message to user
+    - output(value) / output("name", value) — explicit result publication
+    - sleep(seconds) — async pause with safety limit
+    - set_var/get_var — cross-block variable persistence
+    - Large result caching with ref_id and get_result()
+    - Auto JSON→dict/list conversion for tool results
     """
 
-    def __init__(self, tool_dispatcher: Callable[[str, dict], Awaitable[str]]):
+    def __init__(
+        self,
+        tool_dispatcher: Callable[[str, dict], Awaitable[str]],
+        var_store: dict[str, Any] | None = None,
+        send_message_fn: Callable[[str], None] | None = None,
+    ):
         """
         Args:
             tool_dispatcher: async callable (tool_name, tool_args) -> result_string
+            var_store: persistent variable store shared across blocks (pass same dict each time)
+            send_message_fn: callback to send real-time message to user (display + telegram)
         """
         self._dispatch = tool_dispatcher
         self._tool_names: set[str] = set()
         self._env: dict[str, Any] = {}
         self._output: list[str] = []
         self._call_log: list[dict] = []
+        self._messages: list[str] = []  # real-time messages sent via send_message()
+        self._output_entries: list[dict] = []  # explicit output() entries
+        self._var_store: dict[str, Any] = var_store if var_store is not None else {}
+        self._result_cache: dict[str, str] = {}  # ref_id -> full result text
+        self._send_message_fn = send_message_fn
 
     def register_tools(self, tool_names: list[str]):
         """Register available tool names so they can be called from Starlark code."""
@@ -103,21 +162,42 @@ class StarlarkExecutor:
         Returns:
             {
                 "success": bool,
-                "output": str,          # captured print() output
-                "call_log": [...],       # list of {tool, args, result}
-                "variables": {...},      # final variable state
+                "output": str,              # captured print() output
+                "call_log": [...],           # list of {tool, args, result}
+                "variables": {...},          # final variable state
                 "error": str | None,
+                "messages": [...],           # real-time messages sent
+                "output_entries": [...],     # explicit output() entries
+                "var_updates": {...},        # vars to persist (from set_var + named output)
             }
         """
         self._env = dict(_SAFE_BUILTINS)
         self._output = []
         self._call_log = []
+        self._messages = []
+        self._output_entries = []
+        # NOTE: _result_cache is NOT cleared between execute() calls
+        # so refs from block 1 can be accessed in block 2 within the same turn
 
+        # Inject persistent variables from var_store as _name globals
+        for name, value in self._var_store.items():
+            self._env[f"_{name}"] = value
+
+        # Register built-in utility functions
         self._env["print"] = lambda *args, **kwargs: self._output.append(
             " ".join(str(a) for a in args)
         )
         self._env["json_loads"] = json.loads
         self._env["json_dumps"] = lambda obj, **kw: json.dumps(obj, ensure_ascii=False, **kw)
+        self._env["send_message"] = self._builtin_send_message
+        self._env["output"] = self._builtin_output
+        self._env["set_var"] = self._builtin_set_var
+        self._env["get_var"] = self._builtin_get_var
+        self._env["get_result"] = self._builtin_get_result
+        self._env["sleep"] = self._builtin_sleep_sync  # placeholder, real async handled in _eval_call
+
+        # Sanitize code before parsing
+        code = _sanitize_code(code)
 
         try:
             tree = ast.parse(code, mode="exec")
@@ -128,23 +208,42 @@ class StarlarkExecutor:
                 "call_log": [],
                 "variables": {},
                 "error": f"SyntaxError: {e}",
+                "messages": [],
+                "output_entries": [],
+                "var_updates": {},
             }
 
         try:
             await self._exec_body(tree.body)
+
+            # Collect user-defined variables (exclude builtins and internals)
+            _internal_names = {
+                "print", "json_loads", "json_dumps", "send_message",
+                "output", "set_var", "get_var", "get_result", "sleep",
+            }
             user_vars = {
                 k: self._repr_value(v)
                 for k, v in self._env.items()
                 if k not in _SAFE_BUILTINS
-                and k not in ("print", "json_loads", "json_dumps")
+                and k not in _internal_names
                 and not k.startswith("_")
             }
+
+            # Collect var_updates from set_var calls and named output() calls
+            var_updates = {}
+            for entry in self._output_entries:
+                if entry.get("name"):
+                    var_updates[entry["name"]] = entry["value"]
+
             return {
                 "success": True,
                 "output": "\n".join(self._output),
                 "call_log": self._call_log,
                 "variables": user_vars,
                 "error": None,
+                "messages": self._messages,
+                "output_entries": self._output_entries,
+                "var_updates": var_updates,
             }
         except _StarlarkError as e:
             return {
@@ -153,6 +252,9 @@ class StarlarkExecutor:
                 "call_log": self._call_log,
                 "variables": {},
                 "error": str(e),
+                "messages": self._messages,
+                "output_entries": self._output_entries,
+                "var_updates": {},
             }
         except Exception as e:
             return {
@@ -161,7 +263,61 @@ class StarlarkExecutor:
                 "call_log": self._call_log,
                 "variables": {},
                 "error": f"{type(e).__name__}: {e}",
+                "messages": self._messages,
+                "output_entries": self._output_entries,
+                "var_updates": {},
             }
+
+    # ── Built-in utility functions ───────────────────────────────────────
+
+    def _builtin_send_message(self, text: str):
+        """Send a real-time message to the user during code execution."""
+        text = str(text)
+        self._messages.append(text)
+        if self._send_message_fn:
+            self._send_message_fn(text)
+
+    def _builtin_output(self, *args):
+        """Explicit result publication.
+
+        output(value) — publish unnamed result
+        output("name", value) — publish named result (also persisted as _name in next block)
+        """
+        if len(args) == 1:
+            self._output_entries.append({"name": None, "value": args[0]})
+        elif len(args) == 2:
+            name = str(args[0])
+            value = args[1]
+            self._output_entries.append({"name": name, "value": value})
+            # Also store in var_store for cross-block persistence
+            self._var_store[name] = value
+        else:
+            raise _StarlarkError("output() takes 1 or 2 arguments: output(value) or output('name', value)")
+
+    def _builtin_set_var(self, name: str, value: Any):
+        """Save a variable to the persistent store (available in next code block as _name)."""
+        name = str(name)
+        self._var_store[name] = value
+        self._output.append(f"[set_var] {name} = {str(value)[:100]}")
+
+    def _builtin_get_var(self, name: str, default: Any = None) -> Any:
+        """Retrieve a variable from the persistent store."""
+        return self._var_store.get(str(name), default)
+
+    def _builtin_get_result(self, ref_id: str, offset: int = 0, limit: int = 5000) -> str:
+        """Retrieve a cached large result by its ref_id."""
+        ref_id = str(ref_id)
+        if ref_id not in self._result_cache:
+            return f"Error: result '{ref_id}' not found in cache. Available: {list(self._result_cache.keys())}"
+        full = self._result_cache[ref_id]
+        return full[offset:offset + limit]
+
+    def _builtin_sleep_sync(self, seconds: float):
+        """Placeholder — actual async sleep is handled in _eval_call."""
+        # This is never actually called; the async version is used instead
+        pass
+
+    # ── Core execution ───────────────────────────────────────────────────
 
     def _repr_value(self, v: Any) -> str:
         """Safe string representation of a value."""
@@ -200,13 +356,23 @@ class StarlarkExecutor:
             iter_val = await self._eval_expr(node.iter)
             for item in iter_val:
                 self._assign(node.target, item)
-                await self._exec_body(node.body)
+                try:
+                    await self._exec_body(node.body)
+                except _BreakSignal:
+                    break
+                except _ContinueSignal:
+                    continue
 
         elif isinstance(node, ast.While):
             max_iters = 1000
             i = 0
             while await self._eval_expr(node.test):
-                await self._exec_body(node.body)
+                try:
+                    await self._exec_body(node.body)
+                except _BreakSignal:
+                    break
+                except _ContinueSignal:
+                    pass
                 i += 1
                 if i >= max_iters:
                     raise _StarlarkError("While loop exceeded 1000 iterations (safety limit)")
@@ -350,9 +516,18 @@ class StarlarkExecutor:
         raise _StarlarkError(f"Unsupported expression: {type(node).__name__}")
 
     async def _eval_call(self, node: ast.Call) -> Any:
-        """Evaluate a function call — may be a tool call or a builtin."""
+        """Evaluate a function call — may be a tool call, builtin, or special async function."""
         if isinstance(node.func, ast.Name):
             func_name = node.func.id
+
+            # Handle async sleep specially
+            if func_name == "sleep":
+                args = [await self._eval_expr(a) for a in node.args]
+                seconds = float(args[0]) if args else 1.0
+                seconds = min(seconds, 30.0)  # Safety limit: max 30 seconds
+                self._output.append(f"[sleep] {seconds}s...")
+                await asyncio.sleep(seconds)
+                return None
 
             if func_name in self._tool_names:
                 return await self._call_tool(func_name, node)
@@ -391,8 +566,8 @@ class StarlarkExecutor:
 
         raise _StarlarkError(f"Unsupported call target: {type(node.func).__name__}")
 
-    async def _call_tool(self, tool_name: str, node: ast.Call) -> str:
-        """Dispatch a tool call and return the result string."""
+    async def _call_tool(self, tool_name: str, node: ast.Call) -> Any:
+        """Dispatch a tool call, cache large results, and auto-convert JSON results."""
         args = [await self._eval_expr(a) for a in node.args]
         kwargs = {kw.arg: await self._eval_expr(kw.value) for kw in node.keywords}
 
@@ -427,14 +602,32 @@ class StarlarkExecutor:
                         tool_args[f"arg{i}"] = arg
 
         self._output.append(f"[tool:{tool_name}] → calling...")
-        result = await self._dispatch(tool_name, tool_args)
+        result_str = await self._dispatch(tool_name, tool_args)
+
+        # Cache large results and truncate for context efficiency
+        result_preview = str(result_str)[:300]
+        ref_id = None
+        if isinstance(result_str, str) and len(result_str) > _RESULT_CACHE_THRESHOLD:
+            ref_id = f"ref_{hashlib.md5(f'{tool_name}_{time.time()}'.encode()).hexdigest()[:8]}"
+            self._result_cache[ref_id] = result_str
+            truncated = result_str[:_RESULT_CACHE_PREVIEW]
+            result_str = f"{truncated}\n\n... [truncated {len(result_str):,} chars, use get_result(\"{ref_id}\") to read more]"
+
         self._call_log.append({
             "tool": tool_name,
             "args": {k: str(v)[:200] for k, v in tool_args.items()},
-            "result_preview": str(result)[:300],
+            "result_preview": result_preview,
+            "ref_id": ref_id,
         })
-        self._output.append(f"[tool:{tool_name}] ← done ({len(str(result))} chars)")
-        return result
+        self._output.append(f"[tool:{tool_name}] ← done ({len(str(result_str))} chars){f' [cached: {ref_id}]' if ref_id else ''}")
+
+        # Auto-convert JSON results to native types (dict/list)
+        if isinstance(result_str, str):
+            converted = _try_json_convert(result_str)
+            if converted is not None:
+                return converted
+
+        return result_str
 
     async def _eval_listcomp(self, node: ast.ListComp) -> list:
         """Evaluate a list comprehension."""
@@ -518,6 +711,27 @@ class StarlarkExecutor:
         raise _StarlarkError(f"Unsupported comparison: {type(op).__name__}")
 
 
+def _try_json_convert(s: str) -> Any:
+    """Try to convert a string result to a native Python type (dict/list).
+
+    Returns the converted value, or None if the string is not valid JSON
+    or is a simple scalar (not useful to convert).
+    """
+    s_stripped = s.strip()
+    if not s_stripped:
+        return None
+    # Only convert if it looks like JSON object or array
+    if not (s_stripped.startswith("{") or s_stripped.startswith("[")):
+        return None
+    try:
+        parsed = json.loads(s_stripped)
+        if isinstance(parsed, (dict, list)):
+            return parsed
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return None
+
+
 class _StarlarkError(Exception):
     """Error raised during Starlark execution."""
     pass
@@ -582,25 +796,50 @@ def _default_for_type(t: str) -> str:
 
 
 def format_starlark_results(result: dict) -> str:
-    """Format execution results as a user message to send back to the LLM."""
+    """Format execution results as a user message to send back to the LLM.
+
+    If output_entries exist, uses OUTPUT MODE: shows only explicit output() entries
+    and errors, suppressing raw tool call results to prevent duplication.
+    """
     parts = []
+    output_entries = result.get("output_entries", [])
 
-    if result["call_log"]:
-        parts.append("## Tool Call Results\n")
-        for i, call in enumerate(result["call_log"], 1):
-            parts.append(f"### {i}. {call['tool']}")
-            if call["args"]:
-                args_str = ", ".join(f"{k}={v}" for k, v in call["args"].items())
-                parts.append(f"Args: {args_str}")
-            parts.append(f"Result:\n```\n{call['result_preview']}\n```\n")
+    if output_entries:
+        # OUTPUT MODE: only show explicit output() entries + errors
+        parts.append("## Output\n")
+        for i, entry in enumerate(output_entries, 1):
+            name = entry.get("name")
+            value = entry.get("value")
+            value_str = str(value)
+            if len(value_str) > 2000:
+                value_str = value_str[:2000] + "\n... (truncated)"
+            if name:
+                parts.append(f"### {name}\n```\n{value_str}\n```\n")
+            else:
+                parts.append(f"### Output {i}\n```\n{value_str}\n```\n")
+    else:
+        # STANDARD MODE: show tool call results
+        if result.get("call_log"):
+            parts.append("## Tool Call Results\n")
+            for i, call in enumerate(result["call_log"], 1):
+                parts.append(f"### {i}. {call['tool']}")
+                if call.get("args"):
+                    args_str = ", ".join(f"{k}={v}" for k, v in call["args"].items())
+                    parts.append(f"Args: {args_str}")
+                preview = call.get("result_preview", "")
+                ref_id = call.get("ref_id")
+                if ref_id:
+                    parts.append(f"Result (truncated, ref={ref_id}):\n```\n{preview}\n```\n")
+                else:
+                    parts.append(f"Result:\n```\n{preview}\n```\n")
 
-    if result["output"]:
+    if result.get("output"):
         parts.append(f"## Print Output\n```\n{result['output']}\n```\n")
 
-    if result["error"]:
+    if result.get("error"):
         parts.append(f"## Error\n```\n{result['error']}\n```\n")
 
-    if result["variables"]:
+    if result.get("variables"):
         vars_str = "\n".join(f"  {k} = {v}" for k, v in result["variables"].items())
         parts.append(f"## Variables\n```\n{vars_str}\n```")
 

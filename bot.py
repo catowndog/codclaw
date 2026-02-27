@@ -344,7 +344,35 @@ def scan_uploads() -> list[dict]:
     return blocks
 
 
-def build_system_prompt(skills_summary: str, mcp_tool_names: list[str], db_configured: bool, references_summary: str = "", tool_signatures: str = "") -> str:
+def get_codes_summary() -> str:
+    """Scan .temp/codes/ and return a summary of available code examples."""
+    codes_dir = Path(config.CODES_DIR)
+    if not codes_dir.exists():
+        return ""
+
+    skip = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+    files = []
+    for filepath in sorted(codes_dir.rglob("*")):
+        if not filepath.is_file():
+            continue
+        if any(part in skip for part in filepath.parts):
+            continue
+        rel = filepath.relative_to(codes_dir)
+        try:
+            size = filepath.stat().st_size
+            files.append(f"  - {rel} ({size:,} bytes)")
+        except OSError:
+            files.append(f"  - {rel}")
+        if len(files) >= 100:
+            files.append(f"  ... and more files (truncated at 100)")
+            break
+
+    if not files:
+        return ""
+    return f"{len(files)} code example(s) available:\n" + "\n".join(files)
+
+
+def build_system_prompt(skills_summary: str, mcp_tool_names: list[str], db_configured: bool, references_summary: str = "", tool_signatures: str = "", codes_summary: str = "") -> str:
     """Build the detailed system prompt for the universal autonomous agent."""
     mcp_tools_str = ", ".join(mcp_tool_names) if mcp_tool_names else "None"
     db_status = "CONNECTED — use execute_sql for queries" if db_configured else "NOT CONFIGURED — set DATABASE_URL in .env to enable"
@@ -359,6 +387,18 @@ These sites were analyzed as reference examples. Use read_file to load the full 
 
 IMPORTANT: Always consult the reference reports when building similar features.
 Load the relevant report with read_file before implementing UI, navigation, or functionality.
+"""
+
+    codes_section = ""
+    if codes_summary:
+        codes_section = f"""
+# CODE KNOWLEDGE BASE (.temp/codes/)
+
+Code examples and templates are available for reference. Use `search_codes(query)` to find relevant code, then `read_code(path)` to read the full file.
+
+{codes_summary}
+
+IMPORTANT: ALWAYS search the code knowledge base BEFORE writing code. It may contain patterns, templates, and examples relevant to your task.
 """
 
     return f"""{config.SYSTEM_PROMPT}
@@ -386,9 +426,12 @@ You call tools by writing ```starlark code blocks in your response. Each block i
 
 ## How it works:
 1. Write a ```starlark code block with tool function calls
-2. The code is executed — tool calls run and return results as strings
-3. You receive the results and can write more ```starlark blocks to continue
+2. The code is executed — ALL tool calls run and results are collected
+3. You receive a summary of results as a user-message on the next iteration
 4. You can use variables, if/else, for loops, string operations between tool calls
+5. One code block can execute 50+ tool calls with loops and conditions — much cheaper than individual API round-trips
+
+## CRITICAL RULE: NEVER write text response AFTER a ```starlark block in the same message. You don't know the results yet — writing text after code will hallucinate results. Put your text BEFORE the code block, or wait for results and respond in the next iteration.
 
 ## Example:
 ```starlark
@@ -396,12 +439,14 @@ You call tools by writing ```starlark code blocks in your response. Each block i
 listing = list_directory(path=".", recursive=True)
 print(listing)
 
-# Read a file
+# Read a file — result is auto-converted to dict if valid JSON
 pkg = read_file(path="package.json")
-if "vue" in pkg:
-    # Run Vue-specific commands
+if isinstance(pkg, dict) and "vue" in str(pkg):
     result = execute_shell(command="npm run build")
     print(result)
+
+# Use output() to explicitly publish results (suppresses raw tool output)
+output("build_result", result)
 ```
 
 ## Available tool functions:
@@ -415,7 +460,42 @@ if "vue" in pkg:
 - `web_search(query)`, `web_fetch(url)` — search the web and fetch pages
 - `http_request(method, url)` — full HTTP client
 - `list_skills()`, `read_skill(name)`, `create_skill(name, content)` — knowledge files
+- `generate_image(prompt, filename)` — generate AI image and save to file (for icons, illustrations, backgrounds)
+- `search_codes(query)`, `read_code(path)` — search and read code examples from .temp/codes/ knowledge base
 - MCP tools: {mcp_tools_str}
+
+## Built-in utility functions (always available, no tool call overhead):
+- `print(...)` — debug output, captured in results for you to see (NOT sent to user)
+- `send_message(text)` — send a real-time message to the user DURING code execution
+- `output(value)` or `output("name", value)` — explicitly publish a result. When used, suppresses raw tool outputs in the summary to avoid duplication. Named outputs are persisted as variables for next code block.
+- `sleep(seconds)` — async pause (max 30 seconds)
+- `set_var("name", value)` — save a variable to persistent store (available in next code block as `_name`)
+- `get_var("name")` / `get_var("name", default)` — retrieve a persisted variable
+- `get_result(ref_id)` / `get_result(ref_id, offset=0, limit=5000)` — retrieve a cached large result (when tool output was truncated, you'll see the ref_id in the result)
+- `json_loads(s)` / `json_dumps(obj)` — parse/serialize JSON
+
+## Cross-block persistence:
+Variables saved via `set_var("mydata", value)` or `output("mydata", value)` are available in the NEXT code block as `_mydata`. Example:
+```starlark
+# Block 1: save data
+data = execute_sql(query="SELECT * FROM users LIMIT 10")
+set_var("users", data)
+```
+After results come back, in the next block:
+```starlark
+# Block 2: _users is automatically available
+for user in _users:
+    print(user)
+```
+
+## Large result caching:
+Tool results larger than 10K chars are automatically truncated and cached. You'll see: `... [truncated, use get_result("ref_xxxx") to read more]`. Use `get_result("ref_xxxx", offset=0, limit=5000)` to read portions of the full result.
+
+## Type conversion:
+Tool results that are valid JSON objects/arrays are automatically converted to dict/list. You can access fields directly: `data["key"]` instead of parsing strings.
+
+## Error handling:
+Tool errors are returned as strings starting with "Error:". Check with: `if "Error:" in str(result):`. There is NO try/except in Starlark — errors from tools are always strings, not exceptions.
 
 ## Starlark syntax:
 - Variables: `x = tool_call(...)`
@@ -424,12 +504,14 @@ if "vue" in pkg:
 - Functions: `len()`, `str()`, `int()`, `print()`, `range()`, `sorted()`
 - Data: lists `[]`, dicts `{{}}`, tuples `()`
 - Logic: `and`, `or`, `not`, comparisons
+- NO: `import`, `class`, `try/except`, `with`, `lambda`, `def` (only tool functions are callable)
 
 ## Available skills:
 {skills_summary}
 
 ## Database: {db_status}
 {refs_section}
+{codes_section}
 # WORK PROCESS
 
 ## Task Tracking — .temp/tasks.md (YOUR task list, you own it)
@@ -522,6 +604,30 @@ After implementing any feature, you MUST verify it works:
 - If no tests exist: write them first, then run
 - Click through the UI using rc-devtools__click to test interactions
 - Check console errors: rc-devtools__evaluate_script with script: `JSON.stringify(window.__errors || [])`
+
+## IMAGE GENERATION (you can create images!):
+You have a built-in `generate_image(prompt, filename, size)` tool that generates images using AI.
+USE IT PROACTIVELY whenever the project needs visual assets:
+- **Logos & icons** — generate favicons, app icons, brand logos
+- **Hero images** — landing page banners, section backgrounds
+- **Illustrations** — feature illustrations, empty states, onboarding graphics
+- **Backgrounds** — patterns, gradients, decorative backgrounds
+- **UI elements** — placeholders, avatars, category images
+- **OG images** — social media preview images
+
+Example:
+```starlark
+generate_image(
+    prompt="Minimalist modern tech startup logo, blue gradient, clean lines, transparent background",
+    filename="public/images/logo.png",
+    size="1024x1024"
+)
+```
+
+Write DETAILED prompts for better results. Include: style, colors, mood, composition, what NOT to include.
+Sizes: `1024x1024` (square), `1792x1024` (landscape), `1024x1792` (portrait).
+Images are saved directly to PROJECT_PATH and auto-sent to Telegram.
+DO NOT use placeholder images from the internet — GENERATE them with this tool instead.
 
 ## Error Recovery:
 - If a command fails: read the error message, diagnose, fix, retry
@@ -840,8 +946,11 @@ async def run_agent():
     skills_summary = skills.get_skills_summary()
     mcp_tool_names = [t["name"] for t in mcp.get_all_tools()]
     references_summary = get_reference_reports_summary(config.TEMP_DIR)
+    codes_summary = get_codes_summary()
+    if codes_summary:
+        display.show_info(f"Code knowledge base: {codes_summary.split(chr(10))[0]}")
     tool_sigs = agent.get_starlark_tool_signatures()
-    system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary, tool_signatures=tool_sigs)
+    system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary, tool_signatures=tool_sigs, codes_summary=codes_summary)
 
     plan_content = read_plan_file()
     file_listing = get_project_file_listing(config.PROJECT_PATH)
@@ -893,7 +1002,8 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
                 skills_summary = skills.get_skills_summary()
                 mcp_tool_names = [t["name"] for t in mcp.get_all_tools()]
                 tool_sigs = agent.get_starlark_tool_signatures()
-                system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary, tool_signatures=tool_sigs)
+                codes_summary = get_codes_summary()
+                system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary, tool_signatures=tool_sigs, codes_summary=codes_summary)
 
                 response_text = await agent.run_turn(user_msg, system_prompt, check_interrupt=_check_keypress, check_pause=_wait_if_paused)
             except Exception as e:
@@ -1009,15 +1119,23 @@ The skill file name should be derived from the topic in kebab-case.
 Start your response with the skill name on the first line as: SKILL_NAME: name-here
 Then an empty line, then the full skill content starting with the one-line description."""
 
-    budget = max(config.MAX_TOKENS - 1024, 4096)
     body = {
         "model": config.get_model(),
         "max_tokens": config.MAX_TOKENS,
-        "thinking": {"type": "enabled", "budget_tokens": budget},
         "system": system_prompt,
         "messages": [{"role": "user", "content": description}],
         "stream": True,
     }
+    # Add thinking if enabled (EFFORT-based budget)
+    if config.THINKING_ENABLED and config.EFFORT != "low":
+        if config.EFFORT == "medium":
+            budget = min(16384, config.MAX_TOKENS - 8192)
+        elif config.EFFORT == "high":
+            budget = min(config.MAX_TOKENS // 2, config.MAX_TOKENS - 8192)
+        else:  # max
+            budget = config.MAX_TOKENS - 8192
+        budget = max(budget, 4096)
+        body["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
     import httpx as _httpx
     timeout = _httpx.Timeout(connect=30.0, read=None, write=30.0, pool=30.0)

@@ -70,6 +70,39 @@ def _openai_headers() -> dict[str, str]:
     }
 
 
+def _extract_xml_tool_calls(text: str) -> list[dict]:
+    """Extract <tool_call> XML tags from text that some models write instead of native tool_use.
+
+    Parses patterns like:
+      <tool_call> {"name": "read_skill", "arguments": {"name": "example"}} </tool_call>
+    Returns list of tool call dicts: [{"id": "...", "name": "...", "input": {...}}]
+    """
+    import re as _re
+    results = []
+    pattern = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
+    matches = _re.findall(pattern, text, _re.DOTALL)
+    for i, match in enumerate(matches):
+        try:
+            data = json.loads(match)
+            name = data.get("name", "")
+            # Support both "arguments" and "input" keys
+            args = data.get("arguments", data.get("input", data.get("params", {})))
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, ValueError):
+                    args = {}
+            if name:
+                results.append({
+                    "id": f"xml_tc_{i}_{hash(name) % 10000}",
+                    "name": name,
+                    "input": args if isinstance(args, dict) else {},
+                })
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return results
+
+
 def _convert_tools_to_openai(tools: list[dict]) -> list[dict]:
     """Convert Anthropic tool definitions to OpenAI function calling format."""
     openai_tools = []
@@ -546,6 +579,18 @@ class LLMAgent:
         self.builtin = builtin_tools
         self.stats = token_stats
         self.messages: list[dict] = []
+        # Persistent variable store for cross-block Starlark persistence
+        self._var_store: dict[str, any] = {}
+
+    def _send_message_for_starlark(self, text: str):
+        """Callback for send_message() inside Starlark — shows real-time message to user."""
+        display.show_text_response(text)
+        config.log_output(f"📨 {text[:200]}")
+        try:
+            import telegram as _tg
+            _tg.send(f"📨 <b>Agent message:</b>\n\n{text[:600]}")
+        except Exception:
+            pass
 
     def _build_tools(self) -> list[dict]:
         """Combine MCP tools + skills tools + built-in tools into one list."""
@@ -586,8 +631,10 @@ class LLMAgent:
         if tools:
             input_estimate += len(json.dumps(tools)) // 4  # tool definitions
         # Reserve space: input + output + 2K safety margin
+        # Minimum 32K output tokens — anything less is unusable for the agent
+        MIN_OUTPUT_TOKENS = 64_000
         available = context_window - input_estimate - 2000
-        safe = min(config.MAX_TOKENS, max(available, 4096))
+        safe = min(config.MAX_TOKENS, max(available, MIN_OUTPUT_TOKENS))
         if safe < config.MAX_TOKENS:
             display.show_info(f"Auto-adjusted max_tokens: {config.MAX_TOKENS:,} → {safe:,} (input ~{input_estimate:,} tokens, context {context_window:,})")
         return safe
@@ -604,8 +651,16 @@ class LLMAgent:
             "stream": True,
         }
 
-        budget = max(safe_max_tokens - 1024, 4096)
-        body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        # Thinking budget based on EFFORT level (low = off, medium/high/max = scaled)
+        if config.THINKING_ENABLED and config.EFFORT != "low":
+            if config.EFFORT == "medium":
+                budget = min(16384, safe_max_tokens - 8192)
+            elif config.EFFORT == "high":
+                budget = min(safe_max_tokens // 2, safe_max_tokens - 8192)
+            else:  # max
+                budget = safe_max_tokens - 8192
+            budget = max(budget, 4096)
+            body["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
         if tools:
             body["tools"] = tools
@@ -903,9 +958,28 @@ class LLMAgent:
             elif bt == "text":
                 text = block.get("text", "")
                 if text.strip():
-                    result["text_parts"].append(text)
-                    display.show_text_response(text)
-                    config.log_output(f"💬 {text.strip()[:200]}")
+                    # Check for <tool_call> XML tags in text (some models/proxies
+                    # write tool calls as text instead of native tool_use blocks)
+                    xml_tools = _extract_xml_tool_calls(text)
+                    if xml_tools:
+                        # Strip the XML tool_call tags from displayed text
+                        import re as _re
+                        clean_text = _re.sub(
+                            r'<tool_call>\s*\{.*?\}\s*</tool_call>',
+                            '', text, flags=_re.DOTALL
+                        ).strip()
+                        if clean_text:
+                            result["text_parts"].append(clean_text)
+                            display.show_text_response(clean_text)
+                            config.log_output(f"💬 {clean_text[:200]}")
+                        for xtc in xml_tools:
+                            result["tool_calls"].append(xtc)
+                            display.show_tool_call(xtc["name"], xtc["input"])
+                            display.show_info(f"Parsed <tool_call> from text → {xtc['name']}")
+                    else:
+                        result["text_parts"].append(text)
+                        display.show_text_response(text)
+                        config.log_output(f"💬 {text.strip()[:200]}")
 
             elif bt == "tool_use":
                 tc = {"id": block.get("id", ""), "name": block.get("name", ""), "input": block.get("input", {})}
@@ -940,7 +1014,12 @@ class LLMAgent:
         max_starlark_loops = 50
         self._check_pause = check_pause
 
-        executor = StarlarkExecutor(self._execute_tool)
+        # Create one executor per turn — shares result cache across all starlark blocks
+        executor = StarlarkExecutor(
+            self._execute_tool,
+            var_store=self._var_store,
+            send_message_fn=self._send_message_for_starlark,
+        )
         executor.register_tools(self._get_all_tool_names())
 
         for loop_idx in range(max_starlark_loops):
@@ -952,7 +1031,7 @@ class LLMAgent:
 
             # Force compression if max_tokens would be too small
             safe = self._calc_safe_max_tokens(system, tools)
-            if safe < 8192 and len(self.messages) > KEEP_RECENT_MESSAGES + 2:
+            if safe < 64_000 and len(self.messages) > KEEP_RECENT_MESSAGES + 2:
                 display.show_warning(f"Input too large — safe_max_tokens={safe:,}, forcing compression...")
                 await self._compress_history(system)
 
@@ -964,6 +1043,24 @@ class LLMAgent:
                 display.show_warning("Stop signal detected — finishing current turn...")
 
             result = self._process_response(response)
+
+            # Validate tool_use inputs — skip empty ones that require params (truncated by max_tokens)
+            # Tools without required params (take_screenshot, list_skills, etc.) are OK with {}
+            _no_required = set()
+            for t in tools:
+                schema = t.get("input_schema", {})
+                if not schema.get("required"):
+                    _no_required.add(t["name"])
+            valid_tool_calls = []
+            for tc in result["tool_calls"]:
+                if not tc["input"] and tc["name"] not in _no_required:
+                    display.show_warning(f"Tool '{tc['name']}' has empty input — skipped (likely truncated by max_tokens)")
+                    continue
+                valid_tool_calls.append(tc)
+            if len(valid_tool_calls) < len(result["tool_calls"]):
+                display.show_warning(f"Dropped {len(result['tool_calls']) - len(valid_tool_calls)} broken tool call(s)")
+            result["tool_calls"] = valid_tool_calls
+
             all_text_parts.extend(result["text_parts"])
 
             _resp_text = "\n".join(result["text_parts"]).strip()
@@ -972,6 +1069,15 @@ class LLMAgent:
                 _tg.send(f"💬 <b>Response:</b>\n\n{_resp_text[:600]}")
 
             stop_reason = response.get("stop_reason")
+
+            # Detect "thinking-only" responses: model spent all budget on thinking,
+            # produced no text and no tool calls. Treat as incomplete — request continuation.
+            if (result["has_thinking"] and not result["text_parts"]
+                    and not result["tool_calls"] and stop_reason == "end_turn"):
+                display.show_warning("Response contained only thinking — requesting continuation...")
+                self.messages.append({"role": "assistant", "content": response["content"]})
+                self.messages.append({"role": "user", "content": "Continue — provide your actual response with tool calls or text."})
+                continue
 
             self.messages.append({"role": "assistant", "content": response["content"]})
 
@@ -994,6 +1100,12 @@ class LLMAgent:
 
                     if exec_result.get("error"):
                         display.show_error(f"Starlark error: {exec_result['error']}")
+
+                    # Collect persistent variable updates
+                    var_updates = exec_result.get("var_updates", {})
+                    if var_updates:
+                        self._var_store.update(var_updates)
+                        display.show_info(f"Persisted {len(var_updates)} variable(s): {', '.join(var_updates.keys())}")
 
                     all_results.append(exec_result)
 
@@ -1159,6 +1271,7 @@ class LLMAgent:
 
     def reset_history(self):
         self.messages.clear()
+        self._var_store.clear()
 
     def save_history(self, filepath: str):
         try:
