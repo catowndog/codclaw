@@ -546,9 +546,10 @@ Rules for tasks.md:
 3. **Load relevant skills**: Call `list_skills`, then `read_skill` for any applicable skill
 4. **Execute the task**: Use the best combination of tools. Break complex tasks into steps.
 5. **Verify the result**: Run tests, check output, validate files exist and are correct
-6. **Update tasks.md**: Move completed task to "Completed" with result. If no tasks left — generate new ones.
-7. **Update plan.md**: Mark completed plan items with `sed`. NEVER overwrite the entire plan.md.
-8. **End with a DETAILED summary**: List specifically what files were changed, what was built, what was tested. This summary is sent to Telegram.
+6. **Check for missing images**: After any UI/page work — take a screenshot, check if images are placeholder or broken. If so, `generate_image()` immediately. Search code for placeholder URLs (picsum, unsplash, placehold) and replace them.
+7. **Update tasks.md**: Move completed task to "Completed" with result. If no tasks left — generate new ones.
+8. **Update plan.md**: Mark completed plan items with `sed`. NEVER overwrite the entire plan.md.
+9. **End with a DETAILED summary**: List specifically what files were changed, what was built, what was tested. This summary is sent to Telegram.
 
 ## ANTI-REPETITION RULE:
 - Before starting any task, READ .temp/tasks.md "Completed" section
@@ -596,6 +597,8 @@ After implementing any feature, you MUST verify it works:
 - After creating/modifying UI, open it in browser using rc-devtools__navigate_page
 - Take a screenshot with rc-devtools__take_screenshot to verify it looks correct
 - Check for: broken layouts, missing elements, wrong colors, alignment issues
+- **CHECK FOR BROKEN/MISSING IMAGES** — if any `<img>` shows broken icon or placeholder, generate a real image with `generate_image()` and fix the src path
+- Search source code for placeholder URLs: `search_files(pattern="picsum|placehold|unsplash|dummyimage|via.placeholder")` — replace ALL with generated images
 - If something looks wrong — FIX IT immediately, then screenshot again
 - Test on the actual running dev server (start it first with execute_shell)
 
@@ -605,29 +608,71 @@ After implementing any feature, you MUST verify it works:
 - Click through the UI using rc-devtools__click to test interactions
 - Check console errors: rc-devtools__evaluate_script with script: `JSON.stringify(window.__errors || [])`
 
-## IMAGE GENERATION (you can create images!):
-You have a built-in `generate_image(prompt, filename, size)` tool that generates images using AI.
-USE IT PROACTIVELY whenever the project needs visual assets:
-- **Logos & icons** — generate favicons, app icons, brand logos
-- **Hero images** — landing page banners, section backgrounds
-- **Illustrations** — feature illustrations, empty states, onboarding graphics
-- **Backgrounds** — patterns, gradients, decorative backgrounds
-- **UI elements** — placeholders, avatars, category images
-- **OG images** — social media preview images
+## IMAGE GENERATION — MANDATORY FOR ALL VISUAL PROJECTS:
+You have a built-in `generate_image(prompt, filename, size)` tool. You MUST use it proactively.
 
-Example:
+### WHEN TO GENERATE (do it WITHOUT being asked):
+- **ANY new page/section** that needs a hero image, banner, or background — generate it IMMEDIATELY
+- **Logo missing?** — generate it before writing any other code
+- **Favicon missing?** — generate a favicon
+- **Empty states** — generate illustrations for "no data", "loading", "404", "empty cart" etc.
+- **Feature icons** — generate custom icons for features, categories, services
+- **Product/service images** — generate placeholder visuals that match the site's theme
+- **Team/about photos** — generate professional illustrations or avatars
+- **Testimonial avatars** — generate realistic profile pictures
+- **Blog/article covers** — generate relevant cover images
+- **OG/social images** — generate social media preview images
+- **Background patterns** — generate decorative backgrounds, gradients, textures
+
+### RULES:
+1. **NEVER use placeholder URLs** (picsum.photos, via.placeholder.com, unsplash, placehold.co) — ALWAYS generate real images
+2. **NEVER leave `src=""` or broken image paths** — generate the image and set the correct path
+3. **NEVER skip images** because "they can be added later" — add them NOW
+4. **After creating any UI component**, check if it needs images and generate them
+5. **After building any page**, review it via screenshot — if images are missing or broken, generate them
+6. **Generate MULTIPLE images** in one starlark block when a page needs several visuals
+
+### PROMPT TIPS (better prompts = better images):
+- Be SPECIFIC: "Modern minimalist fintech dashboard illustration, isometric 3D style, blue and purple gradient, white background, showing charts and data visualization"
+- Include style: photorealistic, flat design, isometric, watercolor, minimalist, 3D render
+- Include colors that match the site's color scheme
+- Include mood: professional, playful, elegant, bold, calm
+- Say what NOT to include: "no text, no watermarks, no people"
+- For icons: "simple flat icon, single color, transparent background, centered"
+
+### SIZES:
+- `1024x1024` — square (logos, icons, avatars, OG images)
+- `1792x1024` — landscape (hero banners, section backgrounds, blog covers)
+- `1024x1792` — portrait (mobile backgrounds, vertical banners)
+
+### EXAMPLE — generate multiple images for a landing page:
 ```starlark
+# Generate hero background
 generate_image(
-    prompt="Minimalist modern tech startup logo, blue gradient, clean lines, transparent background",
-    filename="public/images/logo.png",
-    size="1024x1024"
+    prompt="Abstract modern tech background, flowing blue and purple gradient waves, dark theme, no text, cinematic lighting",
+    filename="public/images/hero-bg.jpg",
+    size="1792x1024"
+)
+
+# Generate feature icons
+features = [
+    ("speed", "Lightning bolt icon, flat design, electric blue, transparent background, minimal"),
+    ("security", "Shield with checkmark icon, flat design, green accent, transparent background, minimal"),
+    ("analytics", "Bar chart with upward trend icon, flat design, purple accent, transparent background, minimal"),
+]
+for name, prompt in features:
+    generate_image(prompt=prompt, filename=f"public/images/icon-{{name}}.png", size="1024x1024")
+
+# Generate about section illustration
+generate_image(
+    prompt="Team collaboration illustration, isometric 3D style, people working together at computers, modern office, blue palette, white background",
+    filename="public/images/about-illustration.png",
+    size="1792x1024"
 )
 ```
 
-Write DETAILED prompts for better results. Include: style, colors, mood, composition, what NOT to include.
-Sizes: `1024x1024` (square), `1792x1024` (landscape), `1024x1792` (portrait).
-Images are saved directly to PROJECT_PATH and auto-sent to Telegram.
-DO NOT use placeholder images from the internet — GENERATE them with this tool instead.
+Images are saved directly to PROJECT_PATH and auto-sent to Telegram for review.
+**RULE: If you see ANY placeholder image URL in the code — replace it with a generated image immediately.**
 
 ## Error Recovery:
 - If a command fails: read the error message, diagnose, fix, retry
@@ -659,7 +704,8 @@ Your working directory is .temp/ inside PROJECT_PATH. Use it for:
 7. **BE THOROUGH** — Don't skip steps. If the plan says "write tests", write actual tests.
 8. **SAVE KNOWLEDGE** — If you solve a hard problem, create a skill for future reference.
 9. **DETAILED REPORTS** — End every iteration with a SPECIFIC summary: which files changed, what was built/fixed, test results. Not vague "made progress" — list concrete actions.
-10. **NEVER STOP, NEVER SAY DONE** — The project is NEVER finished. When tasks run out: search the web for new ideas and improvements (web_search), browse competitor sites via rc-devtools for inspiration, analyze code for optimizations, add new tasks to .temp/tasks.md, and execute them immediately. NEVER output phrases like "project is complete" or "all tasks done"."""
+10. **NEVER STOP, NEVER SAY DONE** — The project is NEVER finished. When tasks run out: search the web for new ideas and improvements (web_search), browse competitor sites via rc-devtools for inspiration, analyze code for optimizations, add new tasks to .temp/tasks.md, and execute them immediately. NEVER output phrases like "project is complete" or "all tasks done".
+11. **GENERATE IMAGES, NOT PLACEHOLDERS** — NEVER use placeholder image URLs (picsum, unsplash, placehold.co, via.placeholder, dummyimage). ALWAYS use `generate_image()` to create real, unique images for the project. After building any page or component with images, take a screenshot — if any image is broken or placeholder, fix it immediately by generating a real one."""
 
 
 def build_initial_message(plan_content: str, file_listing: str, image_blocks: list[dict] | None = None):

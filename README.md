@@ -7,28 +7,28 @@ A fully autonomous AI agent that executes tasks from a plan file, using shell co
 
 ## ✨ Features
 
-| Feature                        | Description                                                                              |
-| ------------------------------ | ---------------------------------------------------------------------------------------- |
-| **Autonomous Loop**            | Reads `.temp/plan.md`, executes tasks, updates progress — no human input needed          |
-| **Infinite Work Mode**         | When all tasks done — researches new ideas via web, generates new tasks, keeps improving |
-| **Starlark Tool Calling**      | LLM writes imperative code blocks — loops, conditions, variables — 50+ tool calls in one round-trip |
-| **Raw HTTP API**               | No SDK — direct SSE streaming to Anthropic/OpenAI-compatible proxy                       |
-| **Built-in Tools (12)**        | Shell, SQL, file ops, HTTP, web search, image generation, code knowledge base            |
-| **Image Generation**           | `generate_image` tool — create icons, illustrations, backgrounds via AI                  |
-| **Code Knowledge Base**        | `.temp/codes/` — drop code examples, agent auto-indexes and searches them before writing |
-| **MCP Servers**                | rc-devtools browser, filesystem, postgres — with `${VAR}` template support               |
-| **Skills System**              | Reusable `.md` knowledge files — create, update, or auto-create during agent work        |
-| **Reference Sites**            | Auto-crawl analog sites before starting, save detailed reports                           |
-| **Auto-save Snapshots**        | Screenshots and DOM snapshots auto-saved to `.temp/references/` on every MCP call        |
-| **Telegram Notifications**     | Start/stop, iterations, tool calls (filtered), screenshots, errors, skill files          |
-| **Context Compression**        | Auto-summarize old messages when approaching token limit                                 |
-| **Extended Thinking**          | EFFORT-based thinking budget (low/medium/high/max) with auto-detection of empty responses |
-| **Cross-block Persistence**    | `set_var` / `get_var` — persist variables between starlark code blocks                   |
-| **Large Result Caching**       | Auto-truncate + cache large tool results with `get_result(ref_id)` retrieval             |
-| **Graceful Stop**              | Press `L` — agent receives wrap-up prompt, commits WIP, updates plan, then exits         |
-| **Token Stats**                | Cost tracking with periodic reports every 5 minutes                                      |
-| **Upload Images**              | Place mockups in `.temp/uploads/` — agent sees them at startup                           |
-| **Multi-provider**             | Anthropic + OpenAI-compatible APIs with automatic format conversion                      |
+| Feature                     | Description                                                                                         |
+| --------------------------- | --------------------------------------------------------------------------------------------------- |
+| **Autonomous Loop**         | Reads `.temp/plan.md`, executes tasks, updates progress — no human input needed                     |
+| **Infinite Work Mode**      | When all tasks done — researches new ideas via web, generates new tasks, keeps improving            |
+| **Starlark Tool Calling**   | LLM writes imperative code blocks — loops, conditions, variables — 50+ tool calls in one round-trip |
+| **Raw HTTP API**            | No SDK — direct SSE streaming to Anthropic/OpenAI-compatible proxy                                  |
+| **Built-in Tools (12)**     | Shell, SQL, file ops, HTTP, web search, image generation, code knowledge base                       |
+| **Image Generation**        | `generate_image` tool — create icons, illustrations, backgrounds via AI                             |
+| **Code Knowledge Base**     | `.temp/codes/` — drop code examples, agent auto-indexes and searches them before writing            |
+| **MCP Servers**             | rc-devtools browser, filesystem, postgres — with `${VAR}` template support                          |
+| **Skills System**           | Reusable `.md` knowledge files — create, update, or auto-create during agent work                   |
+| **Reference Sites**         | Auto-crawl analog sites before starting, save detailed reports                                      |
+| **Auto-save Snapshots**     | Screenshots and DOM snapshots auto-saved to `.temp/references/` on every MCP call                   |
+| **Telegram Notifications**  | Start/stop, iterations, tool calls (filtered), screenshots, errors, skill files                     |
+| **Context Compression**     | Auto-summarize old messages when approaching token limit                                            |
+| **Extended Thinking**       | EFFORT-based thinking budget (low/medium/high/max) with auto-detection of empty responses           |
+| **Cross-block Persistence** | `set_var` / `get_var` — persist variables between starlark code blocks                              |
+| **Large Result Caching**    | Auto-truncate + cache large tool results with `get_result(ref_id)` retrieval                        |
+| **Graceful Stop**           | Press `L` — agent receives wrap-up prompt, commits WIP, updates plan, then exits                    |
+| **Token Stats**             | Cost tracking with periodic reports every 5 minutes                                                 |
+| **Upload Images**           | Place mockups in `.temp/uploads/` — agent sees them at startup                                      |
+| **Multi-provider**          | Anthropic + OpenAI-compatible APIs with automatic format conversion                                 |
 
 ## 🚀 Quick Start
 
@@ -70,56 +70,56 @@ REFERENCE_SITES=["https://example.com"]
 IMAGE_MODEL=claude-image
 ```
 
-| Variable             | Required | Default                     | Description                                    |
-| -------------------- | -------- | --------------------------- | ---------------------------------------------- |
-| `API_PROVIDER`       |          | `anthropic`                 | `anthropic` or `openai`                        |
-| `ANTHROPIC_API_KEY`  | ✅       | —                           | API key for Anthropic                          |
-| `ANTHROPIC_BASE_URL` | ✅       | `https://api.anthropic.com` | API endpoint (or proxy)                        |
-| `ANTHROPIC_MODEL`    |          | —                           | Override model for Anthropic                   |
-| `OPENAI_API_KEY`     |          | —                           | API key for OpenAI (when API_PROVIDER=openai)  |
-| `OPENAI_BASE_URL`    |          | `https://api.openai.com/v1` | API endpoint for OpenAI                        |
-| `OPENAI_MODEL`       |          | —                           | Override model for OpenAI                      |
-| `PROJECT_PATH`       | ✅       | —                           | Target project directory                       |
-| `MODEL`              |          | `claude-opus-4-6`           | Default model                                  |
-| `MAX_TOKENS`         |          | `128000`                    | Max output tokens per API call                 |
-| `EFFORT`             |          | `high`                      | Thinking effort: `low` `medium` `high` `max`   |
-| `THINKING_ENABLED`   |          | `true`                      | Enable/disable extended thinking               |
-| `SHOW_THINKING`      |          | `true`                      | Display thinking blocks in CLI                 |
-| `DELAY`              |          | `2`                         | Seconds between iterations                     |
-| `DEBUG_REQUESTS`     |          | `false`                     | Log raw SSE events                             |
-| `IMAGE_MODEL`        |          | `claude-image`              | Model for image generation                     |
-| `TG_BOT_TOKEN`       |          | disabled                    | Telegram bot token                             |
-| `TG_USER_ID`         |          | disabled                    | Telegram user ID for notifications             |
-| `DATABASE_URL`       |          | disabled                    | Database connection string                     |
-| `REFERENCE_SITES`    |          | `[]`                        | JSON array of URLs to crawl before starting    |
-| `MCP_SERVERS_CONFIG` |          | `./mcp_servers.json`        | MCP servers configuration file                 |
-| `SKILLS_DIR`         |          | `./skills`                  | Skills directory                               |
+| Variable             | Required | Default                     | Description                                   |
+| -------------------- | -------- | --------------------------- | --------------------------------------------- |
+| `API_PROVIDER`       |          | `anthropic`                 | `anthropic` or `openai`                       |
+| `ANTHROPIC_API_KEY`  | ✅       | —                           | API key for Anthropic                         |
+| `ANTHROPIC_BASE_URL` | ✅       | `https://api.anthropic.com` | API endpoint (or proxy)                       |
+| `ANTHROPIC_MODEL`    |          | —                           | Override model for Anthropic                  |
+| `OPENAI_API_KEY`     |          | —                           | API key for OpenAI (when API_PROVIDER=openai) |
+| `OPENAI_BASE_URL`    |          | `https://api.openai.com/v1` | API endpoint for OpenAI                       |
+| `OPENAI_MODEL`       |          | —                           | Override model for OpenAI                     |
+| `PROJECT_PATH`       | ✅       | —                           | Target project directory                      |
+| `MODEL`              |          | `claude-opus-4-6`           | Default model                                 |
+| `MAX_TOKENS`         |          | `128000`                    | Max output tokens per API call                |
+| `EFFORT`             |          | `high`                      | Thinking effort: `low` `medium` `high` `max`  |
+| `THINKING_ENABLED`   |          | `true`                      | Enable/disable extended thinking              |
+| `SHOW_THINKING`      |          | `true`                      | Display thinking blocks in CLI                |
+| `DELAY`              |          | `2`                         | Seconds between iterations                    |
+| `DEBUG_REQUESTS`     |          | `false`                     | Log raw SSE events                            |
+| `IMAGE_MODEL`        |          | `claude-image`              | Model for image generation                    |
+| `TG_BOT_TOKEN`       |          | disabled                    | Telegram bot token                            |
+| `TG_USER_ID`         |          | disabled                    | Telegram user ID for notifications            |
+| `DATABASE_URL`       |          | disabled                    | Database connection string                    |
+| `REFERENCE_SITES`    |          | `[]`                        | JSON array of URLs to crawl before starting   |
+| `MCP_SERVERS_CONFIG` |          | `./mcp_servers.json`        | MCP servers configuration file                |
+| `SKILLS_DIR`         |          | `./skills`                  | Skills directory                              |
 
 ### EFFORT Levels (Thinking Budget)
 
-| Level    | Thinking Budget                    | Best For                          |
-| -------- | ---------------------------------- | --------------------------------- |
-| `low`    | Disabled (no thinking)             | Fast responses, simple tasks      |
-| `medium` | 16K tokens                         | Balanced speed/quality            |
-| `high`   | 50% of max_tokens                  | Complex tasks (default)           |
-| `max`    | max_tokens - 8K                    | Maximum reasoning depth           |
+| Level    | Thinking Budget        | Best For                     |
+| -------- | ---------------------- | ---------------------------- |
+| `low`    | Disabled (no thinking) | Fast responses, simple tasks |
+| `medium` | 16K tokens             | Balanced speed/quality       |
+| `high`   | 50% of max_tokens      | Complex tasks (default)      |
+| `max`    | max_tokens - 8K        | Maximum reasoning depth      |
 
 ## 🔧 Built-in Tools (12)
 
-| Tool              | Description                                                   |
-| ----------------- | ------------------------------------------------------------- |
-| `execute_shell`   | Run any bash command (git, npm, curl, docker...)              |
-| `execute_sql`     | SQL/MongoDB queries via `DATABASE_URL`                        |
-| `read_file`       | Read files relative to `PROJECT_PATH`                         |
-| `write_file`      | Create/overwrite files with auto-mkdir                        |
-| `list_directory`  | Browse directories with glob patterns                         |
-| `search_files`    | Regex search across file contents                             |
-| `web_search`      | DuckDuckGo search (no API key needed)                         |
-| `web_fetch`       | Download page and extract text                                |
-| `http_request`    | Full HTTP client (GET/POST/PUT/DELETE)                        |
-| `generate_image`  | Generate AI images (icons, illustrations, backgrounds)        |
-| `search_codes`    | Search code examples in `.temp/codes/` knowledge base         |
-| `read_code`       | Read a code example from the knowledge base                   |
+| Tool             | Description                                            |
+| ---------------- | ------------------------------------------------------ |
+| `execute_shell`  | Run any bash command (git, npm, curl, docker...)       |
+| `execute_sql`    | SQL/MongoDB queries via `DATABASE_URL`                 |
+| `read_file`      | Read files relative to `PROJECT_PATH`                  |
+| `write_file`     | Create/overwrite files with auto-mkdir                 |
+| `list_directory` | Browse directories with glob patterns                  |
+| `search_files`   | Regex search across file contents                      |
+| `web_search`     | DuckDuckGo search (no API key needed)                  |
+| `web_fetch`      | Download page and extract text                         |
+| `http_request`   | Full HTTP client (GET/POST/PUT/DELETE)                 |
+| `generate_image` | Generate AI images (icons, illustrations, backgrounds) |
+| `search_codes`   | Search code examples in `.temp/codes/` knowledge base  |
+| `read_code`      | Read a code example from the knowledge base            |
 
 ## 📝 Starlark Tool Calling
 
@@ -144,18 +144,19 @@ print(examples)
 
 ### Built-in Starlark Functions
 
-| Function                          | Description                                                        |
-| --------------------------------- | ------------------------------------------------------------------ |
-| `print(...)`                      | Debug output — captured in results, NOT sent to user               |
-| `send_message(text)`              | Send real-time message to user during execution                    |
-| `output(value)` / `output(name, value)` | Explicit result publication (suppresses raw tool output)     |
-| `set_var("name", value)`          | Persist variable for next code block (available as `_name`)        |
-| `get_var("name")`                 | Retrieve persisted variable                                        |
-| `get_result(ref_id)`              | Retrieve cached large result (auto-truncated results show ref_id)  |
-| `sleep(seconds)`                  | Async pause (max 30s)                                              |
-| `json_loads(s)` / `json_dumps(v)` | JSON parsing and serialization                                    |
+| Function                                | Description                                                       |
+| --------------------------------------- | ----------------------------------------------------------------- |
+| `print(...)`                            | Debug output — captured in results, NOT sent to user              |
+| `send_message(text)`                    | Send real-time message to user during execution                   |
+| `output(value)` / `output(name, value)` | Explicit result publication (suppresses raw tool output)          |
+| `set_var("name", value)`                | Persist variable for next code block (available as `_name`)       |
+| `get_var("name")`                       | Retrieve persisted variable                                       |
+| `get_result(ref_id)`                    | Retrieve cached large result (auto-truncated results show ref_id) |
+| `sleep(seconds)`                        | Async pause (max 30s)                                             |
+| `json_loads(s)` / `json_dumps(v)`       | JSON parsing and serialization                                    |
 
 ### Auto Features
+
 - **JSON auto-conversion** — tool results that are valid JSON become dict/list automatically
 - **Large result caching** — results >10K chars auto-truncated with `get_result("ref_xxx")` for full access
 - **Cross-block persistence** — `set_var("data", value)` → available as `_data` in next block
@@ -195,6 +196,7 @@ PROJECT_PATH/.temp/codes/
 ```
 
 The agent uses:
+
 - `search_codes("vue.*modal")` — find relevant examples by regex
 - `read_code("components/Modal.vue")` — read the full file
 
@@ -247,16 +249,16 @@ Skills are stored in `skills/` as `.md` files. The agent can also create them du
 
 ## 📱 Telegram Notifications
 
-| Event          | Message                                   |
-| -------------- | ----------------------------------------- |
-| Agent start    | 🚀 MCP servers, tools count, project path |
-| Each iteration | 🤖 Summary of what was done + token usage |
-| Tool calls     | 🔧 Tool name + args preview               |
-| Screenshots    | 📸 Screenshot image sent as photo         |
-| Generated images | 🎨 Image sent as photo                  |
-| Skill created  | ✅ File name + preview + file attachment  |
-| Errors         | ❌ Error details                          |
-| Agent stop     | 🛑 Total iterations + cost                |
+| Event            | Message                                   |
+| ---------------- | ----------------------------------------- |
+| Agent start      | 🚀 MCP servers, tools count, project path |
+| Each iteration   | 🤖 Summary of what was done + token usage |
+| Tool calls       | 🔧 Tool name + args preview               |
+| Screenshots      | 📸 Screenshot image sent as photo         |
+| Generated images | 🎨 Image sent as photo                    |
+| Skill created    | ✅ File name + preview + file attachment  |
+| Errors           | ❌ Error details                          |
+| Agent stop       | 🛑 Total iterations + cost                |
 
 **Filtered out:** `evaluate_script` and `get_snapshot` calls are not sent to TG to avoid spam.
 
