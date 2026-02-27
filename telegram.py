@@ -4,7 +4,7 @@ import httpx
 import config
 
 _last_send_time = 0.0
-_MIN_INTERVAL = 0.5  # seconds between messages to avoid Telegram rate limiting
+_MIN_INTERVAL = 0.5 
 
 
 def send(text: str, parse_mode: str = "HTML") -> bool:
@@ -12,7 +12,6 @@ def send(text: str, parse_mode: str = "HTML") -> bool:
     if not config.TG_BOT_TOKEN or not config.TG_USER_ID:
         return False
 
-    # Rate limit: wait if sending too fast
     now = time.time()
     elapsed = now - _last_send_time
     if elapsed < _MIN_INTERVAL:
@@ -76,8 +75,14 @@ def notify_stop(agent_name: str, iterations: int, total_cost: float = 0):
     send(f"🛑 <b>{agent_name}</b> stopped\n\n{iterations} iterations{cost}")
 
 
-def notify_iteration(iteration: int, agent_name: str, summary: str, tokens_in: int = 0, tokens_out: int = 0):
-    send(f"🤖 <b>{agent_name}</b> — #{iteration}\n\n{summary}\n\n📊 {tokens_in:,} in / {tokens_out:,} out")
+def notify_iteration(iteration: int, agent_name: str, summary: str, tokens_in: int = 0, tokens_out: int = 0, tasks_preview: str = ""):
+    tasks_section = f"\n\n📋 <b>Tasks:</b>\n{tasks_preview}" if tasks_preview else ""
+    send(
+        f"🤖 <b>{agent_name}</b> — iteration #{iteration}\n\n"
+        f"<b>Done this iteration:</b>\n{summary}\n"
+        f"{tasks_section}\n"
+        f"📊 {tokens_in:,} in / {tokens_out:,} out"
+    )
 
 
 def notify_error(agent_name: str, error: str):
@@ -87,6 +92,67 @@ def notify_error(agent_name: str, error: str):
 def notify_tool_call(tool_name: str, args_preview: str = ""):
     preview = f"\n<code>{args_preview[:300]}</code>" if args_preview else ""
     send(f"🔧 <b>{tool_name}</b>{preview}")
+
+
+_last_update_id = 0
+
+
+def poll_fix_commands() -> list[str]:
+    """
+    Poll Telegram for /fix commands from the user.
+    Returns list of fix messages (text after /fix).
+    Non-blocking — returns empty list if no updates.
+    """
+    global _last_update_id
+    if not config.TG_BOT_TOKEN or not config.TG_USER_ID:
+        return []
+
+    url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/getUpdates"
+    params = {"offset": _last_update_id + 1, "timeout": 0, "allowed_updates": ["message"]}
+
+    try:
+        resp = httpx.get(url, params=params, timeout=5)
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        if not data.get("ok"):
+            return []
+    except Exception:
+        return []
+
+    fixes = []
+    for update in data.get("result", []):
+        _last_update_id = update.get("update_id", _last_update_id)
+        msg = update.get("message", {})
+        if str(msg.get("from", {}).get("id", "")) != str(config.TG_USER_ID):
+            continue
+        text = msg.get("text", "")
+        if text.startswith("/fix"):
+            fix_text = text[4:].strip()
+            if fix_text:
+                fixes.append(fix_text)
+                send(f"✅ Fix request received! Will be applied soon.\n\n<i>{fix_text[:300]}</i>")
+            else:
+                send("⚠️ Usage: <code>/fix describe what to fix</code>")
+
+    return fixes
+
+
+def init_polling():
+    """Initialize polling by skipping old updates."""
+    global _last_update_id
+    if not config.TG_BOT_TOKEN:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/getUpdates"
+        resp = httpx.get(url, params={"offset": -1, "timeout": 0}, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            results = data.get("result", [])
+            if results:
+                _last_update_id = results[-1].get("update_id", 0)
+    except Exception:
+        pass
 
 
 def notify_skill_start(skill_description: str):

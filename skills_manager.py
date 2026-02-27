@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 
 
-# Built-in tools that get added to the Anthropic API tools list
 SKILLS_TOOLS = [
     {
         "name": "list_skills",

@@ -581,6 +581,11 @@ class BuiltinTools:
         filepath = self._resolve_path(path_str)
 
         try:
+            if filepath.name == "plan.md" and filepath.exists() and not append:
+                import shutil
+                backup = filepath.with_suffix(".md.bak")
+                shutil.copy2(filepath, backup)
+
             filepath.parent.mkdir(parents=True, exist_ok=True)
             mode = "a" if append else "w"
             with open(filepath, mode, encoding="utf-8") as f:

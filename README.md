@@ -7,19 +7,21 @@ A fully autonomous AI agent that executes tasks from a plan file, using shell co
 
 ## ✨ Features
 
-| Feature                    | Description                                                                     |
-| -------------------------- | ------------------------------------------------------------------------------- |
-| **Autonomous Loop**        | Reads `.temp/plan.md`, executes tasks, updates progress — no human input needed |
-| **Raw HTTP API**           | No SDK — direct SSE streaming to Anthropic-compatible proxy                     |
-| **Built-in Tools**         | Shell, SQL (PostgreSQL/MySQL/SQLite/MongoDB), file ops, HTTP, web search        |
-| **MCP Servers**            | rc-devtools browser, filesystem, postgres — with `${VAR}` template support      |
-| **Skills System**          | Reusable `.md` knowledge files — create via CLI or during agent work            |
-| **Reference Sites**        | Auto-crawl analog sites before starting, save detailed reports                  |
-| **Telegram Notifications** | Start/stop, every iteration summary, tool calls, errors, skill files            |
-| **Context Compression**    | Auto-summarize old messages when approaching token limit                        |
-| **Graceful Stop**          | Press `L` to finish current task and shut down cleanly                          |
-| **Token Stats**            | Cost tracking with periodic reports every 5 minutes                             |
-| **Upload Images**          | Place mockups in `.temp/uploads/` — agent sees them at startup                  |
+| Feature                    | Description                                                                               |
+| -------------------------- | ----------------------------------------------------------------------------------------- |
+| **Autonomous Loop**        | Reads `.temp/plan.md`, executes tasks, updates progress — no human input needed            |
+| **Infinite Work Mode**     | When all tasks done — researches new ideas via web, generates new tasks, keeps improving   |
+| **Raw HTTP API**           | No SDK — direct SSE streaming to Anthropic-compatible proxy                                |
+| **Built-in Tools**         | Shell, SQL (PostgreSQL/MySQL/SQLite/MongoDB), file ops, HTTP, web search                   |
+| **MCP Servers**            | rc-devtools browser, filesystem, postgres — with `${VAR}` template support                 |
+| **Skills System**          | Reusable `.md` knowledge files — create, update, or auto-create during agent work          |
+| **Reference Sites**        | Auto-crawl analog sites before starting, save detailed reports                             |
+| **Auto-save Snapshots**    | Screenshots and DOM snapshots auto-saved to `.temp/references/` on every MCP call          |
+| **Telegram Notifications** | Start/stop, iterations, tool calls (filtered), screenshots, errors, skill files            |
+| **Context Compression**    | Auto-summarize old messages when approaching token limit                                   |
+| **Graceful Stop**          | Press `L` — agent receives wrap-up prompt, commits WIP, updates plan, then exits           |
+| **Token Stats**            | Cost tracking with periodic reports every 5 minutes                                        |
+| **Upload Images**          | Place mockups in `.temp/uploads/` — agent sees them at startup                             |
 
 ## 🚀 Quick Start
 
@@ -112,10 +114,16 @@ Config in `mcp_servers.json` with `${VAR}` templates from `.env`:
 ## 📚 Skills
 
 ```bash
+# Create a new skill
 python bot.py --create-skill "Express.js REST API guide"
+
+# Update an existing skill (interactive picker)
+python bot.py --update-skill
 ```
 
 Skills are stored in `skills/` as `.md` files. The agent can also create them during work via the `create_skill` tool.
+
+**Update flow:** `--update-skill` → select skill with ↑/↓ arrows → Enter → type what to change → Claude rewrites the skill.
 
 ## 📱 Telegram Notifications
 
@@ -124,16 +132,20 @@ Skills are stored in `skills/` as `.md` files. The agent can also create them du
 | Agent start    | 🚀 MCP servers, tools count, project path |
 | Each iteration | 🤖 Summary of what was done + token usage |
 | Tool calls     | 🔧 Tool name + args preview               |
+| Screenshots    | 📸 Screenshot image sent as photo         |
 | Skill created  | ✅ File name + preview + file attachment  |
 | Errors         | ❌ Error details                          |
 | Agent stop     | 🛑 Total iterations + cost                |
+
+**Filtered out:** `evaluate_script` and `get_snapshot` calls are not sent to TG to avoid spam.
+Rate limiting (0.5s between messages) prevents Telegram API throttling.
 
 ## 📁 Project Structure
 
 ```
 CLI/
-├── bot.py                # Main entry — agent loop + --create-skill
-├── anthropic_client.py   # Raw HTTP SSE streaming client
+├── bot.py                # Main entry — agent loop + --create-skill + --update-skill
+├── anthropic_client.py   # Raw HTTP SSE streaming client + auto-save snapshots
 ├── config.py             # .env loader (override=True)
 ├── builtin_tools.py      # 9 built-in tools
 ├── mcp_client.py         # MCP stdio client with ${VAR} templates
@@ -141,7 +153,7 @@ CLI/
 ├── site_researcher.py    # Reference site crawler via MCP browser
 ├── display.py            # Rich CLI output
 ├── stats.py              # Token/cost tracking
-├── telegram.py           # Telegram Bot API notifications
+├── telegram.py           # Telegram Bot API notifications (rate-limited)
 ├── mcp_servers.json      # MCP server config
 ├── skills/               # Skill files (.md)
 ├── .env                  # Settings (git-ignored)
@@ -152,6 +164,9 @@ PROJECT_PATH/.temp/       # Agent working directory
 ├── conversation.json     # Conversation history
 ├── uploads/              # Reference images (agent sees at startup)
 ├── references/           # Reference site reports
+│   ├── screenshots/      # Auto-saved screenshots (.png)
+│   └── snapshots/        # Auto-saved DOM snapshots (.txt)
+├── notes.md              # Agent working notes
 └── errors.log            # Error tracking
 ```
 
@@ -162,22 +177,27 @@ PROJECT_PATH/.temp/       # Agent working directory
 2. Crawl REFERENCE_SITES (if configured)
 3. Load images from .temp/uploads/
 4. Read .temp/plan.md
-5. Loop:
+5. Loop (infinite):
    ├── Send plan + tools to Claude (SSE streaming)
    ├── Claude calls tools (shell, files, DB, web, MCP)
    ├── Execute tools → return results → Claude continues
+   ├── Auto-save screenshots/snapshots to .temp/references/
    ├── Display response → save conversation
    ├── Send Telegram notification
    ├── Auto-compress context if >80% of 200k window
+   ├── If all tasks done → agent researches new ideas → adds tasks → continues
    └── Wait DELAY seconds → next iteration
+6. On press L → wrap-up prompt → agent commits, updates plan → exit
 ```
 
 ## ⌨️ Controls
 
-| Key      | Action                                     |
-| -------- | ------------------------------------------ |
-| `L`      | Graceful stop (finishes current iteration) |
-| `Ctrl+C` | Immediate stop (saves state)               |
+| Input            | Action                                                                  |
+| ---------------- | ----------------------------------------------------------------------- |
+| `Enter`          | Send a message to the agent — injected as priority task next iteration  |
+| `L`              | Graceful stop — instant feedback, agent wraps up in 3-5 min, L disabled after first press |
+| `Ctrl+C`         | Immediate stop (saves state)                                            |
+| TG: `/fix <msg>` | Send a fix request via Telegram bot — same as Enter but from your phone |
 
 ## 📊 Database Support
 
