@@ -1,6 +1,6 @@
 """
 Anthropic API client — raw HTTP requests (no SDK).
-Handles SSE streaming, tool use loop, conversation history, auto-compression.
+Handles SSE streaming, Starlark-based tool calling, conversation history, auto-compression.
 Compatible with Anthropic API proxies (OpenRouter/FAL translation layer).
 """
 
@@ -17,6 +17,7 @@ from mcp_client import MCPManager
 from skills_manager import SkillsManager
 from builtin_tools import BuiltinTools, BUILTIN_TOOLS
 from stats import TokenStats
+from starlark_executor import StarlarkExecutor, extract_starlark_blocks, generate_tool_signatures, format_starlark_results
 
 MODEL_CONTEXT_WINDOWS = {
     "claude-opus-4-6": 200_000,
@@ -369,8 +370,20 @@ class AnthropicAgent:
             tools.extend(SKILLS_TOOLS)
         return tools
 
+    def _get_all_tool_names(self) -> list[str]:
+        """Get flat list of all tool names for Starlark registration."""
+        return [t["name"] for t in self._build_tools()]
+
+    def get_starlark_tool_signatures(self) -> str:
+        """Generate Starlark function signatures for the system prompt."""
+        return generate_tool_signatures(self._build_tools())
+
     async def _call_api(self, system: str, tools: list[dict]) -> dict:
-        """Make an async streaming API call and return the reconstructed response dict."""
+        """Make an async streaming API call and return the reconstructed response dict.
+
+        Note: tools are NO LONGER sent in the API body — the LLM uses Starlark
+        code blocks in text responses to call tools instead.
+        """
         body: dict[str, Any] = {
             "model": config.MODEL,
             "max_tokens": config.MAX_TOKENS,
@@ -382,8 +395,7 @@ class AnthropicAgent:
         budget = max(config.MAX_TOKENS - 1024, 4096)
         body["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
-        if tools:
-            body["tools"] = tools
+        # Tools are NOT sent to the API — Starlark handles tool calls via text
 
         url = _api_url()
         headers = _headers()
@@ -585,7 +597,10 @@ class AnthropicAgent:
         return result
 
     async def run_turn(self, user_content: str, system: str, check_interrupt: Callable[[], bool] | None = None) -> str:
-        """Run a complete agent turn with tool use loop.
+        """Run a complete agent turn with Starlark-based tool calling.
+
+        The LLM writes ```starlark code blocks in its text response.
+        We parse and execute them, then feed results back so the LLM can continue.
 
         Args:
             check_interrupt: optional callback called between tool calls and after API responses.
@@ -595,9 +610,13 @@ class AnthropicAgent:
 
         tools = self._build_tools()
         all_text_parts = []
-        max_tool_loops = 50
+        max_starlark_loops = 50
 
-        for loop_idx in range(max_tool_loops):
+        # Create Starlark executor bound to our tool dispatcher
+        executor = StarlarkExecutor(self._execute_tool)
+        executor.register_tools(self._get_all_tool_names())
+
+        for loop_idx in range(max_starlark_loops):
             if self._should_compress():
                 await self._compress_history(system)
 
@@ -612,16 +631,46 @@ class AnthropicAgent:
 
             stop_reason = response.get("stop_reason")
 
-            if stop_reason == "end_turn":
-                self.messages.append({"role": "assistant", "content": response["content"]})
-                break
+            # Always save assistant message to history
+            self.messages.append({"role": "assistant", "content": response["content"]})
 
-            elif stop_reason == "tool_use":
-                self.messages.append({"role": "assistant", "content": response["content"]})
+            # Check for starlark blocks in text response
+            full_text = "\n".join(result["text_parts"])
+            starlark_blocks = extract_starlark_blocks(full_text)
 
+            if starlark_blocks:
+                # Execute all starlark blocks
+                all_results = []
+                for i, code in enumerate(starlark_blocks):
+                    if check_interrupt:
+                        check_interrupt()
+
+                    display.show_info(f"Executing starlark block {i+1}/{len(starlark_blocks)}...")
+                    exec_result = await executor.execute(code)
+
+                    # Display tool calls from this block
+                    for call in exec_result.get("call_log", []):
+                        display.show_tool_result(call["tool"], call.get("result_preview", "")[:500])
+
+                    if exec_result.get("error"):
+                        display.show_error(f"Starlark error: {exec_result['error']}")
+
+                    all_results.append(exec_result)
+
+                # Format all results and send back to LLM
+                combined_results = []
+                for i, r in enumerate(all_results):
+                    combined_results.append(f"## Block {i+1} Results\n{format_starlark_results(r)}")
+
+                results_msg = "\n\n".join(combined_results)
+                self.messages.append({"role": "user", "content": results_msg})
+                # Continue loop — LLM will see results and may write more starlark
+                continue
+
+            # Also handle native tool_use if any (backward compat during transition)
+            if stop_reason == "tool_use" and result["tool_calls"]:
                 tool_results = []
                 for tc in result["tool_calls"]:
-                    # Check for interrupt between tool calls
                     if check_interrupt:
                         check_interrupt()
 
@@ -634,15 +683,19 @@ class AnthropicAgent:
                     })
 
                 self.messages.append({"role": "user", "content": tool_results})
+                continue
+
+            # No starlark blocks and no tool calls — check stop reason
+            if stop_reason == "end_turn":
+                break
 
             elif stop_reason in ("max_tokens", "pause_turn"):
-                self.messages.append({"role": "assistant", "content": response["content"]})
                 display.show_warning(f"Stop reason: {stop_reason} — continuing...")
                 self.messages.append({"role": "user", "content": "Continue from where you left off."})
 
             else:
-                display.show_warning(f"Unexpected stop_reason: {stop_reason}")
-                self.messages.append({"role": "assistant", "content": response["content"]})
+                if stop_reason and stop_reason != "end_turn":
+                    display.show_warning(f"Unexpected stop_reason: {stop_reason}")
                 break
 
         return "\n\n".join(all_text_parts) if all_text_parts else "(no text response)"

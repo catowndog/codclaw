@@ -119,11 +119,16 @@ python bot.py --create-skill "Express.js REST API guide"
 
 # Update an existing skill (interactive picker)
 python bot.py --update-skill
+
+# Training mode — teach the agent interactively, it creates skills
+python bot.py --training "Vue.js Composition API patterns"
 ```
 
 Skills are stored in `skills/` as `.md` files. The agent can also create them during work via the `create_skill` tool.
 
 **Update flow:** `--update-skill` → select skill with ↑/↓ arrows → Enter → type what to change → Claude rewrites the skill.
+
+**Training mode:** `--training "topic"` → interactive chat session → type everything you want the agent to learn → `/done` to compile into skills. The agent can sit for hours absorbing knowledge and will create comprehensive skill files at the end.
 
 ## 📱 Telegram Notifications
 
@@ -144,8 +149,9 @@ Rate limiting (0.5s between messages) prevents Telegram API throttling.
 
 ```
 CLI/
-├── bot.py                # Main entry — agent loop + --create-skill + --update-skill
-├── anthropic_client.py   # Raw HTTP SSE streaming client + auto-save snapshots
+├── bot.py                # Main entry — agent loop + --create-skill + --update-skill + --training
+├── anthropic_client.py   # Raw HTTP SSE streaming client + Starlark tool loop
+├── starlark_executor.py  # Starlark code parser + executor (AST-based sandbox)
 ├── config.py             # .env loader (override=True)
 ├── builtin_tools.py      # 9 built-in tools
 ├── mcp_client.py         # MCP stdio client with ${VAR} templates
@@ -153,7 +159,7 @@ CLI/
 ├── site_researcher.py    # Reference site crawler via MCP browser
 ├── display.py            # Rich CLI output
 ├── stats.py              # Token/cost tracking
-├── telegram.py           # Telegram Bot API notifications (rate-limited)
+├── telegram.py           # Telegram Bot API notifications + /stop /pause /resume commands
 ├── mcp_servers.json      # MCP server config
 ├── skills/               # Skill files (.md)
 ├── .env                  # Settings (git-ignored)
@@ -192,12 +198,19 @@ PROJECT_PATH/.temp/       # Agent working directory
 
 ## ⌨️ Controls
 
-| Input            | Action                                                                  |
-| ---------------- | ----------------------------------------------------------------------- |
-| `Enter`          | Send a message to the agent — injected as priority task next iteration  |
-| `L`              | Graceful stop — instant feedback, agent wraps up in 3-5 min, L disabled after first press |
-| `Ctrl+C`         | Immediate stop (saves state)                                            |
-| TG: `/fix <msg>` | Send a fix request via Telegram bot — same as Enter but from your phone |
+| Input              | Action                                                                  |
+| ------------------ | ----------------------------------------------------------------------- |
+| `Enter`            | Send a message to the agent — injected as priority task next iteration  |
+| `L`                | Graceful stop — instant feedback, agent wraps up in 3-5 min            |
+| `P`                | Pause the agent — freezes iteration loop                                |
+| `R`                | Resume — continue after pause                                           |
+| `Ctrl+C`           | Immediate stop (saves state)                                            |
+| TG: `/fix <msg>`   | Send a fix request via Telegram — same as Enter but from your phone     |
+| TG: `/stop`        | Graceful stop — same as pressing L                                      |
+| TG: `/pause`       | Pause the agent                                                         |
+| TG: `/resume`      | Resume after pause                                                      |
+
+**Note:** Keyboard input works even during streaming (dedicated background thread).
 
 ## 📊 Database Support
 

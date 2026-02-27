@@ -1,10 +1,20 @@
+"""
+Telegram Bot API notifications and command polling.
+
+Supports:
+- Sending messages, photos, files (sync — rate-limited)
+- Polling commands: /fix, /stop, /pause, /resume (async — non-blocking)
+"""
+
 import time
 
 import httpx
 import config
 
 _last_send_time = 0.0
-_MIN_INTERVAL = 0.5 
+_MIN_INTERVAL = 0.5
+
+# --- Sync send functions (used from agent loop, rate-limited) ---
 
 
 def send(text: str, parse_mode: str = "HTML") -> bool:
@@ -52,6 +62,9 @@ def send_file(file_path: str, caption: str = "") -> bool:
         return False
 
 
+# --- Notification helpers ---
+
+
 def notify_start(agent_name: str, project_path: str, model: str, mcp_servers: list[str] = None, tools_count: int = 0, skills_count: int = 0):
     mcp_list = "\n".join(f"  • {s}" for s in mcp_servers) if mcp_servers else "none"
     db = config.DATABASE_URL.split("@")[-1] if config.DATABASE_URL and "@" in config.DATABASE_URL else (config.DATABASE_URL or "disabled")
@@ -66,7 +79,8 @@ def notify_start(agent_name: str, project_path: str, model: str, mcp_servers: li
         f"🔧 Tools: {tools_count} | Skills: {skills_count}\n"
         f"🗄 DB: {db}\n"
         f"🌐 Reference sites: {refs}\n\n"
-        f"🔌 MCP:\n{mcp_list}"
+        f"🔌 MCP:\n{mcp_list}\n\n"
+        f"📱 Commands: /fix /stop /pause /resume"
     )
 
 
@@ -75,10 +89,12 @@ def notify_stop(agent_name: str, iterations: int, total_cost: float = 0):
     send(f"🛑 <b>{agent_name}</b> stopped\n\n{iterations} iterations{cost}")
 
 
-def notify_iteration(iteration: int, agent_name: str, summary: str, tokens_in: int = 0, tokens_out: int = 0, tasks_preview: str = ""):
+def notify_iteration(iteration: int, agent_name: str, summary: str, tokens_in: int = 0, tokens_out: int = 0, tasks_preview: str = "", work_description: str = ""):
+    work_section = f"\n\n🔨 <b>Working on:</b>\n{work_description}" if work_description else ""
     tasks_section = f"\n\n📋 <b>Tasks:</b>\n{tasks_preview}" if tasks_preview else ""
     send(
-        f"🤖 <b>{agent_name}</b> — iteration #{iteration}\n\n"
+        f"🤖 <b>{agent_name}</b> — iteration #{iteration}"
+        f"{work_section}\n\n"
         f"<b>Done this iteration:</b>\n{summary}\n"
         f"{tasks_section}\n"
         f"📊 {tokens_in:,} in / {tokens_out:,} out"
@@ -94,48 +110,20 @@ def notify_tool_call(tool_name: str, args_preview: str = ""):
     send(f"🔧 <b>{tool_name}</b>{preview}")
 
 
+def notify_skill_start(skill_description: str):
+    send(f"📝 Creating skill...\n\n<i>{skill_description[:500]}</i>")
+
+
+def notify_skill_done(skill_name: str, skill_size: int, first_lines: str = "", file_path: str = ""):
+    preview = f"\n\n{first_lines[:300]}" if first_lines else ""
+    send(f"✅ <b>{skill_name}.md</b> ({skill_size:,} chars){preview}")
+    if file_path:
+        send_file(file_path, caption=f"📎 {skill_name}.md")
+
+
+# --- Polling: init + async command polling ---
+
 _last_update_id = 0
-
-
-def poll_fix_commands() -> list[str]:
-    """
-    Poll Telegram for /fix commands from the user.
-    Returns list of fix messages (text after /fix).
-    Non-blocking — returns empty list if no updates.
-    """
-    global _last_update_id
-    if not config.TG_BOT_TOKEN or not config.TG_USER_ID:
-        return []
-
-    url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/getUpdates"
-    params = {"offset": _last_update_id + 1, "timeout": 0, "allowed_updates": ["message"]}
-
-    try:
-        resp = httpx.get(url, params=params, timeout=5)
-        if resp.status_code != 200:
-            return []
-        data = resp.json()
-        if not data.get("ok"):
-            return []
-    except Exception:
-        return []
-
-    fixes = []
-    for update in data.get("result", []):
-        _last_update_id = update.get("update_id", _last_update_id)
-        msg = update.get("message", {})
-        if str(msg.get("from", {}).get("id", "")) != str(config.TG_USER_ID):
-            continue
-        text = msg.get("text", "")
-        if text.startswith("/fix"):
-            fix_text = text[4:].strip()
-            if fix_text:
-                fixes.append(fix_text)
-                send(f"✅ Fix request received! Will be applied soon.\n\n<i>{fix_text[:300]}</i>")
-            else:
-                send("⚠️ Usage: <code>/fix describe what to fix</code>")
-
-    return fixes
 
 
 def init_polling():
@@ -155,12 +143,95 @@ def init_polling():
         pass
 
 
-def notify_skill_start(skill_description: str):
-    send(f"📝 Creating skill...\n\n<i>{skill_description[:500]}</i>")
+# Keep old sync version for backward compatibility
+def poll_fix_commands() -> list[str]:
+    """Legacy sync polling — returns list of /fix texts."""
+    result = _parse_updates_sync()
+    return result.get("fixes", [])
 
 
-def notify_skill_done(skill_name: str, skill_size: int, first_lines: str = "", file_path: str = ""):
-    preview = f"\n\n{first_lines[:300]}" if first_lines else ""
-    send(f"✅ <b>{skill_name}.md</b> ({skill_size:,} chars){preview}")
-    if file_path:
-        send_file(file_path, caption=f"📎 {skill_name}.md")
+def _parse_updates_sync() -> dict:
+    """Sync polling — fetch updates and parse all commands."""
+    global _last_update_id
+    if not config.TG_BOT_TOKEN or not config.TG_USER_ID:
+        return {"fixes": [], "stop": False, "pause": False, "resume": False}
+
+    url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/getUpdates"
+    params = {"offset": _last_update_id + 1, "timeout": 0, "allowed_updates": ["message"]}
+
+    try:
+        resp = httpx.get(url, params=params, timeout=5)
+        if resp.status_code != 200:
+            return {"fixes": [], "stop": False, "pause": False, "resume": False}
+        data = resp.json()
+        if not data.get("ok"):
+            return {"fixes": [], "stop": False, "pause": False, "resume": False}
+    except Exception:
+        return {"fixes": [], "stop": False, "pause": False, "resume": False}
+
+    return _parse_updates(data.get("result", []))
+
+
+async def poll_commands_async() -> dict:
+    """
+    Async non-blocking Telegram polling.
+    Returns: {"fixes": [...], "stop": bool, "pause": bool, "resume": bool}
+    """
+    global _last_update_id
+    if not config.TG_BOT_TOKEN or not config.TG_USER_ID:
+        return {"fixes": [], "stop": False, "pause": False, "resume": False}
+
+    url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/getUpdates"
+    params = {"offset": _last_update_id + 1, "timeout": 0, "allowed_updates": ["message"]}
+
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(url, params=params)
+        if resp.status_code != 200:
+            return {"fixes": [], "stop": False, "pause": False, "resume": False}
+        data = resp.json()
+        if not data.get("ok"):
+            return {"fixes": [], "stop": False, "pause": False, "resume": False}
+    except Exception:
+        return {"fixes": [], "stop": False, "pause": False, "resume": False}
+
+    return _parse_updates(data.get("result", []))
+
+
+def _parse_updates(updates: list[dict]) -> dict:
+    """Parse Telegram updates and return structured commands."""
+    global _last_update_id
+
+    result = {"fixes": [], "stop": False, "pause": False, "resume": False}
+
+    for update in updates:
+        _last_update_id = update.get("update_id", _last_update_id)
+        msg = update.get("message", {})
+        if str(msg.get("from", {}).get("id", "")) != str(config.TG_USER_ID):
+            continue
+        text = (msg.get("text", "") or "").strip()
+
+        if text.startswith("/fix"):
+            fix_text = text[4:].strip()
+            if fix_text:
+                result["fixes"].append(fix_text)
+                send(f"✅ Fix request received!\n\n<i>{fix_text[:300]}</i>")
+            else:
+                send("⚠️ Usage: <code>/fix describe what to fix</code>")
+
+        elif text == "/stop":
+            result["stop"] = True
+            send("🛑 <b>STOP</b> command received — agent is wrapping up...")
+
+        elif text == "/pause":
+            result["pause"] = True
+            send("⏸ <b>PAUSE</b> command received — agent paused.")
+
+        elif text == "/resume":
+            result["resume"] = True
+            send("▶️ <b>RESUME</b> command received — agent continuing.")
+
+        elif text == "/status":
+            send("ℹ️ Agent is running. Use /stop /pause /resume /fix")
+
+    return result

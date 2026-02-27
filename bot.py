@@ -11,10 +11,11 @@ import argparse
 import asyncio
 import json
 import os
-import select
+import queue
 import signal
 import sys
 import termios
+import threading
 import time
 import tty
 from pathlib import Path
@@ -46,38 +47,103 @@ After completing these steps, end with a DETAILED summary of the project state."
 
 _stop_requested = False
 _stop_shown = False
+_pause_requested = False
 _original_term_settings = None
 _pending_user_message: str | None = None
+_input_queue: queue.Queue = queue.Queue()
+_stdin_thread: threading.Thread | None = None
+
+
+def _stdin_reader_thread():
+    """Background thread that reads single chars from stdin in cbreak mode.
+
+    Runs independently of the asyncio event loop so keypresses are captured
+    even while the main loop is blocked on SSE streaming.
+    """
+    while True:
+        try:
+            ch = sys.stdin.read(1)
+            if ch:
+                _input_queue.put(ch)
+            else:
+                break
+        except Exception:
+            break
+
+
+def _start_stdin_thread():
+    """Start the background stdin reader thread (daemon, dies with process)."""
+    global _stdin_thread
+    if _stdin_thread is not None:
+        return
+    _stdin_thread = threading.Thread(target=_stdin_reader_thread, daemon=True, name="stdin-reader")
+    _stdin_thread.start()
+
+
+def _show_stop_panel():
+    """Display the graceful stop panel and notify Telegram."""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich import box
+    c = Console()
+    c.print()
+    c.print(Panel(
+        "[bold red]🛑 STOP SIGNAL RECEIVED[/bold red]\n\n"
+        "[yellow]The agent will finish its current work and wrap up.\n"
+        "This may take 3-5 minutes. Please wait...[/yellow]\n\n"
+        "[dim]L key is now disabled. Ctrl+C for immediate kill.[/dim]",
+        title="[bold red]Graceful Shutdown[/bold red]",
+        border_style="red",
+        box=box.HEAVY,
+    ))
+    c.print()
+    telegram.send("🛑 <b>STOP signal received</b>\n\nAgent is wrapping up (3-5 min)...")
+
+
+def _show_pause_panel():
+    """Display the pause panel."""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich import box
+    c = Console()
+    c.print()
+    c.print(Panel(
+        "[bold yellow]⏸  PAUSED[/bold yellow]\n\n"
+        "[cyan]The agent is paused.\n"
+        "Press R or send /resume in Telegram to continue.[/cyan]\n\n"
+        "[dim]Press L to stop instead. Ctrl+C for immediate kill.[/dim]",
+        title="[bold yellow]Paused[/bold yellow]",
+        border_style="yellow",
+        box=box.HEAVY,
+    ))
+    c.print()
+    telegram.send("⏸ <b>Agent PAUSED</b>\n\nSend /resume to continue.")
 
 
 def _check_keypress() -> bool:
-    """Non-blocking check for keypresses. L = stop, Enter = user input."""
-    global _stop_requested, _stop_shown
+    """Non-blocking check for keypresses from the background stdin thread.
+
+    L = stop, Enter = user input, P = pause, R = resume.
+    Works even during SSE streaming because stdin is read in a separate thread.
+    """
+    global _stop_requested, _stop_shown, _pause_requested
     if _stop_requested:
         return True
     try:
-        if select.select([sys.stdin], [], [], 0.0)[0]:
-            ch = sys.stdin.read(1)
+        while not _input_queue.empty():
+            ch = _input_queue.get_nowait()
             if ch.lower() == "l" and not _stop_requested:
                 _stop_requested = True
                 _stop_shown = True
-                from rich.console import Console
-                from rich.panel import Panel
-                from rich import box
-                c = Console()
-                c.print()
-                c.print(Panel(
-                    "[bold red]🛑 STOP SIGNAL RECEIVED[/bold red]\n\n"
-                    "[yellow]The agent will finish its current work and wrap up.\n"
-                    "This may take 3-5 minutes. Please wait...[/yellow]\n\n"
-                    "[dim]L key is now disabled. Ctrl+C for immediate kill.[/dim]",
-                    title="[bold red]Graceful Shutdown[/bold red]",
-                    border_style="red",
-                    box=box.HEAVY,
-                ))
-                c.print()
-                telegram.send("🛑 <b>STOP signal received</b>\n\nAgent is wrapping up (3-5 min)...")
+                _show_stop_panel()
                 return True
+            elif ch.lower() == "p" and not _stop_requested and not _pause_requested:
+                _pause_requested = True
+                _show_pause_panel()
+            elif ch.lower() == "r" and _pause_requested:
+                _pause_requested = False
+                display.show_info("Agent resumed!")
+                telegram.send("▶️ <b>Agent RESUMED</b>")
             elif ch in ("\r", "\n") and not _stop_requested:
                 _collect_user_input()
     except Exception:
@@ -254,7 +320,7 @@ def scan_uploads() -> list[dict]:
     return blocks
 
 
-def build_system_prompt(skills_summary: str, mcp_tool_names: list[str], db_configured: bool, references_summary: str = "") -> str:
+def build_system_prompt(skills_summary: str, mcp_tool_names: list[str], db_configured: bool, references_summary: str = "", tool_signatures: str = "") -> str:
     """Build the detailed system prompt for the universal autonomous agent."""
     mcp_tools_str = ", ".join(mcp_tool_names) if mcp_tool_names else "None"
     db_status = "CONNECTED — use execute_sql for queries" if db_configured else "NOT CONFIGURED — set DATABASE_URL in .env to enable"
@@ -290,72 +356,55 @@ Even if the user's prompt is in another language — your output MUST be in Engl
 - **Database**: {db_status}
 - **MCP tools**: {mcp_tools_str}
 
-# TOOLS REFERENCE
+# TOOL CALLING — STARLARK
 
-## 1. Shell — `execute_shell`
-Run ANY bash command. Use for:
-- Running project commands: `npm install`, `pip install`, `cargo build`, `go run`, `make`
-- Git operations: `git status`, `git add`, `git commit`, `git push`, `git diff`
-- System tools: `ls`, `cat`, `head`, `tail`, `wc`, `find`, `grep`, `curl`, `wget`
-- Package managers: `npm`, `yarn`, `pip`, `poetry`, `cargo`, `brew`
-- Compilers/interpreters: `node`, `python`, `go`, `gcc`, `javac`
-- Docker: `docker build`, `docker run`, `docker-compose`
-- Testing: `npm test`, `pytest`, `go test`, `jest`
-- Linting/formatting: `eslint`, `prettier`, `black`, `flake8`
-You can chain commands with `&&`, use pipes `|`, redirects `>`, etc.
-Timeout: default 30s, max 300s. Set `timeout` for long-running commands.
-Working directory defaults to PROJECT_PATH. Override with `working_dir`.
+You call tools by writing ```starlark code blocks in your response. Each block is executed and results are returned to you.
 
-## 2. Database — `execute_sql`
-Execute queries against the configured database (DATABASE_URL).
-- **SQL** (PostgreSQL, MySQL, SQLite): standard SQL queries, returns JSON
-- **MongoDB**: pass JSON query: `{{"collection":"users","action":"find","filter":{{}}}}`
-  MongoDB actions: find, find_one, insert_one, insert_many, update_one, update_many, delete_one, delete_many, count, aggregate, list_collections
-- Use parameterized queries with `params` for safety
-- Default limit: 100 rows. Increase with `max_rows` if needed.
+## How it works:
+1. Write a ```starlark code block with tool function calls
+2. The code is executed — tool calls run and return results as strings
+3. You receive the results and can write more ```starlark blocks to continue
+4. You can use variables, if/else, for loops, string operations between tool calls
 
-## 3. File Operations — `read_file`, `write_file`, `list_directory`, `search_files`
-All paths are RELATIVE to PROJECT_PATH. You cannot access files outside the project.
-- `read_file`: Read any file. Use `offset`/`max_lines` for large files.
-- `write_file`: Create or overwrite files. Use `append: true` to append. Auto-creates parent directories.
-- `list_directory`: Browse directories. Use `recursive: true` and `pattern` (glob) for filtering.
-- `search_files`: Regex search across file contents (like grep). Use `glob` to filter file types.
+## Example:
+```starlark
+# Read project structure
+listing = list_directory(path=".", recursive=True)
+print(listing)
 
-## 4. Web Search & Fetch — `web_search`, `web_fetch`
-- `web_search`: Search the internet via DuckDuckGo. Returns titles, URLs, snippets.
-  USE THIS to find current docs, tutorials, examples, best practices, API references.
-- `web_fetch`: Download a web page and extract its text content (HTML stripped).
-  USE THIS to read documentation, articles, code examples from URLs found via web_search.
+# Read a file
+pkg = read_file(path="package.json")
+if "vue" in pkg:
+    # Run Vue-specific commands
+    result = execute_shell(command="npm run build")
+    print(result)
+```
 
-IMPORTANT: ALWAYS search the web when you need:
-- Current documentation for frameworks/libraries (versions change!)
-- Code examples and best practices
-- API references and configuration options
-- Solutions to errors you encounter
-- Latest syntax and features
+## Available tool functions:
+{tool_signatures}
 
-## 5. HTTP — `http_request`
-Send HTTP requests to any URL. Supports GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS.
-Use for: testing APIs, fetching data, webhooks, health checks.
-Set `headers` for auth tokens, content-type, etc. Set `body` for POST/PUT payloads.
+## Key tools:
+- `execute_shell(command)` — run any bash command (git, npm, pip, curl, etc). Timeout: 30s default, 300s max.
+- `execute_sql(query)` — SQL/MongoDB queries via DATABASE_URL. MongoDB uses JSON: `{{"collection":"users","action":"find","filter":{{}}}}`
+- `read_file(path)`, `write_file(path, content)` — files relative to PROJECT_PATH
+- `list_directory(path)`, `search_files(pattern)` — browse and search
+- `web_search(query)`, `web_fetch(url)` — search the web and fetch pages
+- `http_request(method, url)` — full HTTP client
+- `list_skills()`, `read_skill(name)`, `create_skill(name, content)` — knowledge files
+- MCP tools: {mcp_tools_str}
 
-## 6. Browser (MCP) — `rc-devtools__navigate_page`, `rc-devtools__evaluate_script`, etc.
-For interactive websites: navigate pages, run JavaScript, take screenshots, click elements.
-Use for: analyzing reference sites, testing your own web app in a real browser.
+## Starlark syntax:
+- Variables: `x = tool_call(...)`
+- Strings: `"hello"`, f-strings, `.split()`, `.strip()`, `in` operator
+- Control: `if/elif/else`, `for x in list`, `while`
+- Functions: `len()`, `str()`, `int()`, `print()`, `range()`, `sorted()`
+- Data: lists `[]`, dicts `{{}}`, tuples `()`
+- Logic: `and`, `or`, `not`, comparisons
 
-## 7. Skills — `list_skills`, `read_skill`, `create_skill`
-Skills are detailed knowledge files (.md) with instructions, code examples, and best practices.
-- `list_skills`: See all available skills (name + short description)
-- `read_skill`: Load the full content of a skill BEFORE starting a complex task
-- `create_skill`: Save reusable knowledge you discover during work (make it VERY detailed)
-Always check available skills before starting a new type of task — they save time and improve quality.
-
-Available skills:
+## Available skills:
 {skills_summary}
 
-## 8. MCP Tools (external)
-Additional tools from connected MCP servers. Tool names are prefixed with server name.
-Available: {mcp_tools_str}
+## Database: {db_status}
 {refs_section}
 # WORK PROCESS
 
@@ -534,6 +583,30 @@ def _get_upload_filenames() -> list[str]:
     )
 
 
+def _extract_work_description(text: str) -> str:
+    """Extract a short description of what the agent is currently doing.
+
+    Looks for the first meaningful line in the response text that describes
+    the work being done — used for Telegram iteration notifications.
+    """
+    if not text:
+        return ""
+    for line in text.strip().split("\n"):
+        line = line.strip()
+        # Skip empty, markdown headers, code fences, bullets with checkmarks
+        if not line or len(line) < 15:
+            continue
+        if line.startswith("```") or line.startswith("---"):
+            continue
+        if line.startswith("- [x]") or line.startswith("- [X]"):
+            continue
+        # Clean markdown formatting
+        clean = line.lstrip("#").lstrip("*").lstrip("-").strip()
+        if clean and len(clean) >= 10:
+            return clean[:200]
+    return text[:200]
+
+
 def build_continuation_message(plan_content: str) -> str:
     """Build the continuation message for subsequent iterations."""
     tasks_content = read_tasks_file()
@@ -578,9 +651,35 @@ IMPORTANT:
 
 
 
+async def _telegram_poller():
+    """Background asyncio task — polls Telegram for commands every 2 seconds."""
+    global _stop_requested, _pause_requested, _pending_user_message
+    while True:
+        try:
+            commands = await telegram.poll_commands_async()
+            if commands["stop"] and not _stop_requested:
+                _stop_requested = True
+                _show_stop_panel()
+            if commands["pause"] and not _pause_requested:
+                _pause_requested = True
+                _show_pause_panel()
+            if commands["resume"] and _pause_requested:
+                _pause_requested = False
+                display.show_info("Agent resumed via Telegram!")
+            for fix in commands["fixes"]:
+                if _pending_user_message is None:
+                    _pending_user_message = fix
+                else:
+                    _pending_user_message += " | " + fix
+                display.show_info(f"TG /fix received: [bold]{fix[:100]}[/bold]")
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+
+
 async def run_agent():
     """Run the main autonomous agent loop."""
-    global _stop_requested
+    global _stop_requested, _pause_requested
 
     errors = config.validate()
     if errors:
@@ -619,12 +718,12 @@ async def run_agent():
         display.show_info("Available skills:")
         display.show_skills_list(skills_list)
 
-    display.show_info("Press [bold yellow]L[/bold yellow] for graceful stop, [bold cyan]Enter[/bold cyan] to send a message to the agent, [bold red]Ctrl+C[/bold red] for immediate stop")
+    display.show_info("Press [bold yellow]L[/bold yellow] stop, [bold magenta]P[/bold magenta] pause, [bold green]R[/bold green] resume, [bold cyan]Enter[/bold cyan] message, [bold red]Ctrl+C[/bold red] kill")
 
     if config.TG_BOT_TOKEN:
         display.show_info("Telegram notifications: enabled")
         telegram.init_polling()
-        display.show_info("Telegram /fix command: listening")
+        display.show_info("Telegram commands: /fix /stop /pause /resume")
         mcp_server_names = list(mcp.sessions.keys()) if mcp.sessions else []
         total_tools = builtin_count + mcp.get_tool_count() + 3
         telegram.notify_start(
@@ -633,6 +732,11 @@ async def run_agent():
         )
     else:
         display.show_info("Telegram notifications: disabled (set TG_BOT_TOKEN + TG_USER_ID in .env)")
+
+    # Start async Telegram poller as background task
+    tg_poller_task = None
+    if config.TG_BOT_TOKEN:
+        tg_poller_task = asyncio.create_task(_telegram_poller())
 
     stats = TokenStats(model=config.MODEL)
     agent = AnthropicAgent(mcp_manager=mcp, skills_manager=skills, builtin_tools=builtin, token_stats=stats)
@@ -647,7 +751,8 @@ async def run_agent():
     skills_summary = skills.get_skills_summary()
     mcp_tool_names = [t["name"] for t in mcp.get_all_tools()]
     references_summary = get_reference_reports_summary(config.TEMP_DIR)
-    system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary)
+    tool_sigs = agent.get_starlark_tool_signatures()
+    system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary, tool_signatures=tool_sigs)
 
     plan_content = read_plan_file()
     file_listing = get_project_file_listing(config.PROJECT_PATH)
@@ -660,6 +765,7 @@ async def run_agent():
     shutdown_mode = False
 
     _setup_terminal()
+    _start_stdin_thread()
 
     # Register SIGINT handler so Ctrl+C works even during async I/O
     _original_sigint = signal.getsignal(signal.SIGINT)
@@ -673,14 +779,14 @@ async def run_agent():
                 display.show_warning("Graceful stop requested — sending wrap-up prompt...")
                 shutdown_mode = True
 
+            # Pause loop — wait until resumed
+            while _pause_requested and not _stop_requested:
+                await asyncio.sleep(0.5)
+                _check_keypress()
+
             display.show_iteration_header(iteration)
 
             pending = _take_pending_message()
-
-            tg_fixes = telegram.poll_fix_commands()
-            if tg_fixes and not pending:
-                pending = " | ".join(tg_fixes)
-                display.show_info(f"TG /fix received: [bold]{pending[:100]}[/bold]")
 
             if shutdown_mode:
                 user_msg = GRACEFUL_STOP_PROMPT
@@ -701,7 +807,8 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
             try:
                 skills_summary = skills.get_skills_summary()
                 mcp_tool_names = [t["name"] for t in mcp.get_all_tools()]
-                system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary)
+                tool_sigs = agent.get_starlark_tool_signatures()
+                system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary, tool_signatures=tool_sigs)
 
                 response_text = await agent.run_turn(user_msg, system_prompt, check_interrupt=_check_keypress)
             except Exception as e:
@@ -718,6 +825,7 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
             agent.save_history(config.CONVERSATION_FILE)
 
             summary = response_text[:800] if response_text else "(no response)"
+            work_desc = _extract_work_description(response_text)
 
             tasks_content = read_tasks_file()
             tasks_preview = ""
@@ -733,6 +841,7 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
                 iteration, config.AGENT_NAME, summary,
                 tokens_in=stats.total_input_tokens, tokens_out=stats.total_output_tokens,
                 tasks_preview=tasks_preview,
+                work_description=work_desc,
             )
 
             if shutdown_mode:
@@ -749,18 +858,24 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
                 shutdown_mode = True
                 continue
 
-            display.show_info(f"Waiting {config.DELAY}s before next iteration... (press L to stop)")
+            display.show_info(f"Waiting {config.DELAY}s before next iteration... (L=stop, P=pause)")
             for _ in range(config.DELAY * 10):
                 await asyncio.sleep(0.1)
                 if _check_keypress() and not shutdown_mode:
                     display.show_warning("Graceful stop requested — will wrap up next iteration...")
                     shutdown_mode = True
                     break
+                # Respect pause during delay
+                while _pause_requested and not _stop_requested:
+                    await asyncio.sleep(0.5)
+                    _check_keypress()
 
     except KeyboardInterrupt:
         display.show_shutdown()
 
     finally:
+        if tg_poller_task is not None:
+            tg_poller_task.cancel()
         signal.signal(signal.SIGINT, _original_sigint)
         _restore_terminal()
         display.show_stats(stats.format_summary())
@@ -1134,6 +1249,115 @@ Apply the changes and return the COMPLETE updated skill file content."""
 
 
 
+async def training_mode(topic: str):
+    """
+    Interactive training mode — user teaches the agent about a topic,
+    and the agent creates/updates skill files based on what it learns.
+    """
+    from anthropic_client import AnthropicAgent
+
+    display.show_banner(config.AGENT_NAME)
+    display.show_info(f"Training mode: [bold]{topic}[/bold]")
+    display.show_info("Type your knowledge, examples, instructions. The agent will learn and create skills.")
+    display.show_info("Commands: [bold]/done[/bold] or [bold]/save[/bold] — compile skills and exit")
+    display.show_info("          [bold]/quit[/bold] — exit without saving")
+    display.show_info("")
+
+    skills = SkillsManager(config.SKILLS_DIR)
+    stats = TokenStats(model=config.MODEL)
+    agent = AnthropicAgent(skills_manager=skills, token_stats=stats)
+
+    existing_skills = skills.get_skills_summary()
+
+    system_prompt = f"""You are in TRAINING MODE. The user will teach you about: {topic}
+
+Your job is to LISTEN, LEARN, and eventually CREATE detailed skill files.
+
+## During training:
+- Acknowledge what you learn with brief confirmations
+- Ask clarifying follow-up questions to deepen understanding
+- Keep mental notes of key concepts, patterns, code examples, best practices
+- If the user provides enough info on a subtopic, you can proactively call create_skill
+- Group related knowledge logically
+
+## Existing skills (check before creating duplicates):
+{existing_skills}
+
+## When the user says /done or /save:
+- Review EVERYTHING you learned during the session
+- For each distinct topic area, create a separate skill file using create_skill
+- If an existing skill overlaps with what you learned, read it first (read_skill) and then update it (create_skill with the same name)
+- Each skill MUST be comprehensive: 3000+ words, code examples, edge cases, best practices
+- The first line of each skill must be a one-line description
+
+## Available tools:
+- list_skills() — see existing skills
+- read_skill(name) — read a skill to check for overlap
+- create_skill(name, content) — create or update a skill file
+
+LANGUAGE: Always write skills in ENGLISH even if the user speaks another language.
+Be conversational and helpful during training. This is a teaching session, not an autonomous work session."""
+
+    # Start the training conversation
+    print()
+    iteration = 0
+
+    while True:
+        try:
+            user_input = input("  📚 You: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            display.show_info("Training session ended.")
+            break
+
+        if not user_input:
+            continue
+
+        if user_input.lower() in ("/quit", "/exit", "/q"):
+            display.show_info("Training session ended without saving.")
+            break
+
+        is_final = user_input.lower() in ("/done", "/save")
+
+        if is_final:
+            user_msg = f"""The training session is COMPLETE.
+
+Now compile EVERYTHING you learned into skill files:
+1. Call list_skills() to see what already exists
+2. For each distinct knowledge area from our conversation, create a comprehensive skill using create_skill
+3. If updating an existing skill, read it first with read_skill, then create_skill with merged content
+4. Make each skill EXTREMELY detailed — 3000+ words minimum
+5. Include all code examples, patterns, edge cases, and best practices from the session
+
+Topic: {topic}
+
+Create the skills now."""
+        else:
+            user_msg = user_input
+
+        try:
+            response_text = await agent.run_turn(user_msg, system_prompt)
+        except Exception as e:
+            display.show_error(f"Error: {e}")
+            continue
+
+        iteration += 1
+
+        if is_final:
+            display.show_info("Training complete! Skills have been created/updated.")
+            display.show_stats(stats.format_summary())
+
+            # Notify Telegram
+            telegram.send(
+                f"📚 <b>Training complete</b>\n\n"
+                f"Topic: {topic}\n"
+                f"Iterations: {iteration}\n"
+                f"💰 ${stats.total_cost:.4f}"
+            )
+            break
+
+    agent.save_history(os.path.join(config.TEMP_DIR, "training_conversation.json"))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="CLI Autonomous Agent",
@@ -1143,6 +1367,7 @@ Examples:
   python bot.py                                      Run autonomous agent
   python bot.py --create-skill "REST API guide"      Create a new skill
   python bot.py --update-skill                       Update an existing skill
+  python bot.py --training "Vue.js patterns"         Train the agent interactively
         """,
     )
     parser.add_argument(
@@ -1156,6 +1381,12 @@ Examples:
         action="store_true",
         help="Interactively select and update an existing skill",
     )
+    parser.add_argument(
+        "--training",
+        type=str,
+        metavar="TOPIC",
+        help="Enter training mode — teach the agent about a topic, it creates skills",
+    )
 
     args = parser.parse_args()
 
@@ -1163,6 +1394,8 @@ Examples:
         asyncio.run(create_skill_mode(args.create_skill))
     elif args.update_skill:
         asyncio.run(update_skill_mode())
+    elif args.training:
+        asyncio.run(training_mode(args.training))
     else:
         asyncio.run(run_agent())
 
