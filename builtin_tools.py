@@ -235,10 +235,75 @@ BUILTIN_TOOLS = [
             "required": ["method", "url"],
         },
     },
+    {
+        "name": "generate_image",
+        "description": (
+            "Generate an image using AI and save it to a file in PROJECT_PATH. "
+            "Use for creating icons, illustrations, backgrounds, hero images, logos, etc. "
+            "Returns the saved file path on success."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Detailed image description prompt",
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Output filename relative to PROJECT_PATH (e.g. 'public/images/hero.png')",
+                },
+                "size": {
+                    "type": "string",
+                    "description": "Image size: '1024x1024', '1792x1024', '1024x1792' (default: '1024x1024')",
+                },
+            },
+            "required": ["prompt", "filename"],
+        },
+    },
+    {
+        "name": "search_codes",
+        "description": (
+            "Search code examples in .temp/codes/ knowledge base. "
+            "Returns matching file paths with preview snippets. "
+            "Use this BEFORE writing code to find relevant patterns, templates, and examples."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query — regex pattern matched against filenames and file contents",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum results to return (default: 10)",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "read_code",
+        "description": (
+            "Read a code example file from .temp/codes/ knowledge base. "
+            "Use after search_codes to read the full content of a matching file."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path relative to .temp/codes/",
+                },
+            },
+            "required": ["path"],
+        },
+    },
 ]
 
 _BUILTIN_TOOL_NAMES = {t["name"] for t in BUILTIN_TOOLS}
-_MAX_OUTPUT = 50_000 
+_MAX_OUTPUT = 50_000
 
 
 
@@ -272,6 +337,12 @@ class BuiltinTools:
                 return await self._web_fetch(tool_args)
             elif tool_name == "http_request":
                 return await self._http_request(tool_args)
+            elif tool_name == "generate_image":
+                return await self._generate_image(tool_args)
+            elif tool_name == "search_codes":
+                return self._search_codes(tool_args)
+            elif tool_name == "read_code":
+                return self._read_code(tool_args)
             else:
                 return f"Unknown built-in tool: {tool_name}"
         except Exception as e:
@@ -816,3 +887,210 @@ class BuiltinTools:
             return f"Request timed out after {timeout}s"
         except Exception as e:
             return f"HTTP error: {type(e).__name__}: {e}"
+
+    async def _generate_image(self, args: dict) -> str:
+        """Generate an image via OpenAI-compatible chat completions API (gpt-5-image)."""
+        prompt = args.get("prompt", "")
+        filename = args.get("filename", "")
+        size = args.get("size", "1024x1024")
+
+        if not prompt:
+            return "Error: 'prompt' is required"
+        if not filename:
+            return "Error: 'filename' is required"
+
+        try:
+            import httpx
+            import config as cfg
+            import base64
+        except ImportError as e:
+            return f"Error: missing dependency: {e}"
+
+        base = cfg.OPENAI_BASE_URL.rstrip("/")
+        if not base.endswith("/chat/completions"):
+            base += "/chat/completions"
+
+        body = {
+            "model": cfg.IMAGE_MODEL,
+            "messages": [
+                {"role": "user", "content": f"Generate image ({size}): {prompt}"}
+            ],
+            "max_tokens": 4096,
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {cfg.OPENAI_API_KEY or cfg.ANTHROPIC_API_KEY}",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=180, follow_redirects=True) as client:
+                resp = await client.post(base, json=body, headers=headers)
+
+                if resp.status_code != 200:
+                    return f"Error: Image API returned {resp.status_code}: {resp.text[:500]}"
+
+                data = resp.json()
+                choices = data.get("choices", [])
+                if not choices:
+                    return f"Error: No choices in response: {json.dumps(data)[:300]}"
+
+                message = choices[0].get("message", {})
+                img_bytes = None
+
+                images = message.get("images", [])
+                for img in images:
+                    img_url_obj = img.get("image_url", {})
+                    url_str = img_url_obj.get("url", "") if isinstance(img_url_obj, dict) else ""
+                    if not url_str:
+                        url_str = img.get("url", "")
+                    if url_str:
+                        m = re.match(r'data:image/[^;]+;base64,(.+)', url_str, re.DOTALL)
+                        if m:
+                            img_bytes = base64.b64decode(m.group(1))
+                            break
+                        elif url_str.startswith("http"):
+                            img_resp = await client.get(url_str)
+                            img_bytes = img_resp.content
+                            break
+
+                if not img_bytes:
+                    content = message.get("content", "")
+                    if isinstance(content, list):
+                        for block in content:
+                            btype = block.get("type", "")
+                            if btype == "image_url":
+                                u = block.get("image_url", {}).get("url", "")
+                                m = re.match(r'data:image/[^;]+;base64,(.+)', u, re.DOTALL)
+                                if m:
+                                    img_bytes = base64.b64decode(m.group(1))
+                                    break
+                            elif btype == "image":
+                                source = block.get("source", {})
+                                if source.get("type") == "base64" and source.get("data"):
+                                    img_bytes = base64.b64decode(source["data"])
+                                    break
+
+                if not img_bytes:
+                    content = message.get("content", "")
+                    if isinstance(content, str) and content:
+                        m = re.search(r'data:image/[^;]+;base64,([A-Za-z0-9+/=]+)', content)
+                        if m:
+                            img_bytes = base64.b64decode(m.group(1))
+                        else:
+                            m = re.search(r'([A-Za-z0-9+/=]{1000,})', content)
+                            if m:
+                                try:
+                                    img_bytes = base64.b64decode(m.group(1))
+                                except Exception:
+                                    pass
+                    if not img_bytes:
+                        m = re.search(r'(https?://\S+\.(?:png|jpg|jpeg|webp))', content)
+                        if m:
+                            img_resp = await client.get(m.group(1))
+                            img_bytes = img_resp.content
+
+                if not img_bytes:
+                    return f"Error: No image found in response. Content: {str(content)[:500]}"
+
+            filepath = self._resolve_path(filename)
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+            with open(filepath, "wb") as f:
+                f.write(img_bytes)
+
+            try:
+                import telegram
+                telegram.send_photo_bytes(img_bytes, f"🎨 {filename}")
+            except Exception:
+                pass
+
+            return f"Image saved: {filename} ({len(img_bytes):,} bytes)"
+
+        except Exception as e:
+            return f"Error generating image: {type(e).__name__}: {e}"
+
+    def _search_codes(self, args: dict) -> str:
+        """Search code examples in .temp/codes/ knowledge base."""
+        query = args.get("query", "")
+        if not query:
+            return "Error: 'query' is required"
+
+        max_results = args.get("max_results", 10)
+
+        import config as cfg
+        codes_dir = Path(cfg.CODES_DIR)
+        if not codes_dir.exists():
+            return "No code knowledge base found. Create .temp/codes/ and add code files."
+
+        try:
+            regex = re.compile(query, re.IGNORECASE)
+        except re.error as e:
+            return f"Invalid regex: {e}"
+
+        skip = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+        results = []
+
+        for filepath in codes_dir.rglob("*"):
+            if not filepath.is_file():
+                continue
+            if any(part in skip for part in filepath.parts):
+                continue
+
+            rel = filepath.relative_to(codes_dir)
+
+            if regex.search(str(rel)):
+                try:
+                    with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                        preview = "".join(f.readline() for _ in range(5))
+                    results.append(f"📄 {rel}\n{preview.strip()[:200]}")
+                except Exception:
+                    results.append(f"📄 {rel}")
+                if len(results) >= max_results:
+                    break
+                continue
+
+            try:
+                with open(filepath, "r", encoding="utf-8", errors="strict") as f:
+                    for line_num, line in enumerate(f, 1):
+                        if regex.search(line):
+                            results.append(f"📄 {rel}:{line_num}: {line.rstrip()[:150]}")
+                            break
+                        if line_num > 500:
+                            break
+            except (UnicodeDecodeError, OSError):
+                continue
+
+            if len(results) >= max_results:
+                break
+
+        if not results:
+            return f"No matches found for '{query}' in .temp/codes/"
+
+        return f"Found {len(results)} match(es) in code knowledge base:\n\n" + "\n\n".join(results)
+
+    def _read_code(self, args: dict) -> str:
+        """Read a code example file from .temp/codes/."""
+        path_str = args.get("path", "")
+        if not path_str:
+            return "Error: 'path' is required"
+
+        import config as cfg
+        codes_dir = Path(cfg.CODES_DIR)
+        filepath = (codes_dir / path_str).resolve()
+
+        if not str(filepath).startswith(str(codes_dir.resolve())):
+            return f"Error: path escapes codes directory: {path_str}"
+
+        if not filepath.exists():
+            return f"File not found: {path_str}"
+        if not filepath.is_file():
+            return f"Not a file: {path_str}"
+
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            if len(content) > _MAX_OUTPUT:
+                content = content[:_MAX_OUTPUT] + f"\n\n... (truncated at {_MAX_OUTPUT} chars)"
+            return content
+        except Exception as e:
+            return f"Error reading code file: {e}"

@@ -105,16 +105,18 @@ IMPORTANT:
 """
 
 
-async def research_sites(agent, reference_sites: list[str], temp_dir: str):
+async def research_sites(agent, reference_sites: list[str], temp_dir: str, check_interrupt=None, check_pause=None):
     """
     Research each reference site before starting the main work loop.
     Creates .md reports in .temp/references/ for each site.
     Skips sites that already have a report (cache).
 
     Args:
-        agent: AnthropicAgent instance (with MCP connected)
+        agent: LLMAgent instance (with MCP connected)
         reference_sites: List of URLs to research
         temp_dir: Path to .temp/ directory
+        check_interrupt: callback that returns True if stop requested
+        check_pause: async callback that blocks while paused
     """
     if not reference_sites:
         return
@@ -164,7 +166,8 @@ Start NOW. Open {url} and begin the full site analysis.
 Create the most detailed report possible — it will be used as a reference for building a similar site."""
 
         try:
-            await agent.run_turn(research_prompt, RESEARCH_SYSTEM_PROMPT)
+            await agent.run_turn(research_prompt, RESEARCH_SYSTEM_PROMPT,
+                                     check_interrupt=check_interrupt, check_pause=check_pause)
             researched.append(url)
             display.show_research_done(url)
         except Exception as e:

@@ -11,6 +11,7 @@ PostgreSQL (often called "Postgres") is a powerful, open-source object-relationa
 ### 1.1 Installing PostgreSQL
 
 **Ubuntu/Debian:**
+
 ```bash
 sudo apt update
 sudo apt install postgresql postgresql-contrib
@@ -19,6 +20,7 @@ sudo systemctl enable postgresql
 ```
 
 **CentOS/RHEL/Fedora:**
+
 ```bash
 sudo dnf install postgresql-server postgresql-contrib
 sudo postgresql-setup --initdb
@@ -27,12 +29,14 @@ sudo systemctl enable postgresql
 ```
 
 **macOS (Homebrew):**
+
 ```bash
 brew install postgresql@16
 brew services start postgresql@16
 ```
 
 **Docker (recommended for development):**
+
 ```bash
 docker run --name my-postgres \
   -e POSTGRES_USER=myuser \
@@ -57,13 +61,14 @@ psql -U postgres -h localhost -p 5432
 
 ### 1.3 Key Configuration Files
 
-| File | Location (typical) | Purpose |
-|------|-------------------|---------|
-| `postgresql.conf` | `/etc/postgresql/16/main/` | Main server configuration |
-| `pg_hba.conf` | `/etc/postgresql/16/main/` | Client authentication rules |
-| `pg_ident.conf` | `/etc/postgresql/16/main/` | OS-to-Postgres user name mapping |
+| File              | Location (typical)         | Purpose                          |
+| ----------------- | -------------------------- | -------------------------------- |
+| `postgresql.conf` | `/etc/postgresql/16/main/` | Main server configuration        |
+| `pg_hba.conf`     | `/etc/postgresql/16/main/` | Client authentication rules      |
+| `pg_ident.conf`   | `/etc/postgresql/16/main/` | OS-to-Postgres user name mapping |
 
 **Important `postgresql.conf` settings:**
+
 ```ini
 # Connection settings
 listen_addresses = 'localhost'      # or '*' for all interfaces
@@ -88,6 +93,7 @@ log_min_duration_statement = 1000   # log queries > 1s
 ```
 
 **`pg_hba.conf` example:**
+
 ```
 # TYPE  DATABASE  USER      ADDRESS        METHOD
 local   all       postgres                 peer
@@ -98,6 +104,7 @@ host    all       all       0.0.0.0/0      scram-sha-256
 ```
 
 After modifying configuration files:
+
 ```bash
 sudo systemctl reload postgresql
 # or from inside psql:
@@ -245,36 +252,36 @@ DROP SCHEMA sales CASCADE; -- drops all objects inside
 
 ### 4.1 Complete Data Types Reference
 
-| Category | Type | Description | Example |
-|----------|------|-------------|---------|
-| **Numeric** | `SMALLINT` | 2 bytes, -32768 to 32767 | `42` |
-| | `INTEGER` / `INT` | 4 bytes, ±2 billion | `100000` |
-| | `BIGINT` | 8 bytes, ±9.2 quintillion | `9999999999` |
-| | `NUMERIC(p,s)` / `DECIMAL` | Exact precision | `99999.99` |
-| | `REAL` | 4 bytes, 6 decimal digits | `3.14` |
-| | `DOUBLE PRECISION` | 8 bytes, 15 decimal digits | `3.141592653589` |
-| | `SERIAL` | Auto-incrementing INT | auto |
-| | `BIGSERIAL` | Auto-incrementing BIGINT | auto |
-| **Text** | `CHAR(n)` | Fixed-length, padded | `'AB  '` |
-| | `VARCHAR(n)` | Variable-length with limit | `'hello'` |
-| | `TEXT` | Unlimited variable-length | `'any length...'` |
-| **Boolean** | `BOOLEAN` | true/false/null | `TRUE` |
-| **Date/Time** | `DATE` | Date only | `'2024-01-15'` |
-| | `TIME` | Time only | `'14:30:00'` |
-| | `TIMESTAMP` | Date + time (no TZ) | `'2024-01-15 14:30:00'` |
-| | `TIMESTAMPTZ` | Date + time with TZ | `'2024-01-15 14:30:00+03'` |
-| | `INTERVAL` | Time span | `'2 hours 30 minutes'` |
-| **Binary** | `BYTEA` | Binary data | `'\xDEADBEEF'` |
-| **JSON** | `JSON` | Text JSON | `'{"key": "val"}'` |
-| | `JSONB` | Binary JSON (preferred) | `'{"key": "val"}'` |
-| **UUID** | `UUID` | 128-bit identifier | `gen_random_uuid()` |
-| **Array** | `type[]` | Array of any type | `'{1,2,3}'` |
-| **Network** | `INET` | IPv4/IPv6 address | `'192.168.1.1/24'` |
-| | `CIDR` | IPv4/IPv6 network | `'192.168.1.0/24'` |
-| | `MACADDR` | MAC address | `'08:00:2b:01:02:03'` |
-| **Enum** | `CREATE TYPE` | Custom enumeration | see below |
-| **Range** | `INT4RANGE`, `TSRANGE`, etc. | Range of values | `'[1,10)'` |
-| **Geometric** | `POINT`, `LINE`, `CIRCLE` | Geometric shapes | `'(1,2)'` |
+| Category      | Type                         | Description                | Example                    |
+| ------------- | ---------------------------- | -------------------------- | -------------------------- |
+| **Numeric**   | `SMALLINT`                   | 2 bytes, -32768 to 32767   | `42`                       |
+|               | `INTEGER` / `INT`            | 4 bytes, ±2 billion        | `100000`                   |
+|               | `BIGINT`                     | 8 bytes, ±9.2 quintillion  | `9999999999`               |
+|               | `NUMERIC(p,s)` / `DECIMAL`   | Exact precision            | `99999.99`                 |
+|               | `REAL`                       | 4 bytes, 6 decimal digits  | `3.14`                     |
+|               | `DOUBLE PRECISION`           | 8 bytes, 15 decimal digits | `3.141592653589`           |
+|               | `SERIAL`                     | Auto-incrementing INT      | auto                       |
+|               | `BIGSERIAL`                  | Auto-incrementing BIGINT   | auto                       |
+| **Text**      | `CHAR(n)`                    | Fixed-length, padded       | `'AB  '`                   |
+|               | `VARCHAR(n)`                 | Variable-length with limit | `'hello'`                  |
+|               | `TEXT`                       | Unlimited variable-length  | `'any length...'`          |
+| **Boolean**   | `BOOLEAN`                    | true/false/null            | `TRUE`                     |
+| **Date/Time** | `DATE`                       | Date only                  | `'2024-01-15'`             |
+|               | `TIME`                       | Time only                  | `'14:30:00'`               |
+|               | `TIMESTAMP`                  | Date + time (no TZ)        | `'2024-01-15 14:30:00'`    |
+|               | `TIMESTAMPTZ`                | Date + time with TZ        | `'2024-01-15 14:30:00+03'` |
+|               | `INTERVAL`                   | Time span                  | `'2 hours 30 minutes'`     |
+| **Binary**    | `BYTEA`                      | Binary data                | `'\xDEADBEEF'`             |
+| **JSON**      | `JSON`                       | Text JSON                  | `'{"key": "val"}'`         |
+|               | `JSONB`                      | Binary JSON (preferred)    | `'{"key": "val"}'`         |
+| **UUID**      | `UUID`                       | 128-bit identifier         | `gen_random_uuid()`        |
+| **Array**     | `type[]`                     | Array of any type          | `'{1,2,3}'`                |
+| **Network**   | `INET`                       | IPv4/IPv6 address          | `'192.168.1.1/24'`         |
+|               | `CIDR`                       | IPv4/IPv6 network          | `'192.168.1.0/24'`         |
+|               | `MACADDR`                    | MAC address                | `'08:00:2b:01:02:03'`      |
+| **Enum**      | `CREATE TYPE`                | Custom enumeration         | see below                  |
+| **Range**     | `INT4RANGE`, `TSRANGE`, etc. | Range of values            | `'[1,10)'`                 |
+| **Geometric** | `POINT`, `LINE`, `CIRCLE`    | Geometric shapes           | `'(1,2)'`                  |
 
 ### 4.2 Custom Types
 
@@ -967,10 +974,10 @@ SET default_transaction_isolation = 'serializable';
 ```
 
 | Isolation Level | Dirty Read | Non-repeatable Read | Phantom Read | Serialization Anomaly |
-|----------------|------------|--------------------|--------------|-----------------------|
-| Read Committed | ✗ | Possible | Possible | Possible |
-| Repeatable Read | ✗ | ✗ | ✗ (in PG) | Possible |
-| Serializable | ✗ | ✗ | ✗ | ✗ |
+| --------------- | ---------- | ------------------- | ------------ | --------------------- |
+| Read Committed  | ✗          | Possible            | Possible     | Possible              |
+| Repeatable Read | ✗          | ✗                   | ✗ (in PG)    | Possible              |
+| Serializable    | ✗          | ✗                   | ✗            | ✗                     |
 
 ### 10.3 Locking
 
@@ -1305,6 +1312,7 @@ SELECT * FROM users WHERE id = 1;
 ```
 
 **Reading EXPLAIN output:**
+
 ```
 Seq Scan on users  (cost=0.00..1.04 rows=1 width=556) (actual time=0.012..0.013 rows=1 loops=1)
   Filter: (email = 'alice@example.com'::text)
@@ -1473,33 +1481,34 @@ ALTER TABLE measurements ATTACH PARTITION measurements_2024_q1
 
 ## 19. Useful psql Commands
 
-| Command | Description |
-|---------|-------------|
-| `\l` | List databases |
-| `\c dbname` | Connect to database |
-| `\dt` | List tables |
-| `\dt+` | List tables with sizes |
-| `\d tablename` | Describe table |
-| `\d+ tablename` | Detailed table info |
-| `\di` | List indexes |
-| `\dv` | List views |
-| `\dm` | List materialized views |
-| `\df` | List functions |
-| `\dn` | List schemas |
-| `\du` | List roles |
-| `\dp` | List access privileges |
-| `\ds` | List sequences |
-| `\x` | Toggle expanded display |
-| `\timing` | Toggle query timing |
-| `\i file.sql` | Execute SQL file |
-| `\o output.txt` | Send output to file |
-| `\copy` | Copy data to/from CSV |
-| `\! command` | Execute shell command |
-| `\q` | Quit psql |
-| `\?` | Help on psql commands |
-| `\h SQL_COMMAND` | Help on SQL syntax |
+| Command          | Description             |
+| ---------------- | ----------------------- |
+| `\l`             | List databases          |
+| `\c dbname`      | Connect to database     |
+| `\dt`            | List tables             |
+| `\dt+`           | List tables with sizes  |
+| `\d tablename`   | Describe table          |
+| `\d+ tablename`  | Detailed table info     |
+| `\di`            | List indexes            |
+| `\dv`            | List views              |
+| `\dm`            | List materialized views |
+| `\df`            | List functions          |
+| `\dn`            | List schemas            |
+| `\du`            | List roles              |
+| `\dp`            | List access privileges  |
+| `\ds`            | List sequences          |
+| `\x`             | Toggle expanded display |
+| `\timing`        | Toggle query timing     |
+| `\i file.sql`    | Execute SQL file        |
+| `\o output.txt`  | Send output to file     |
+| `\copy`          | Copy data to/from CSV   |
+| `\! command`     | Execute shell command   |
+| `\q`             | Quit psql               |
+| `\?`             | Help on psql commands   |
+| `\h SQL_COMMAND` | Help on SQL syntax      |
 
 ### Useful data import/export:
+
 ```sql
 -- Copy table to CSV
 \copy users TO '/tmp/users.csv' WITH CSV HEADER;

@@ -4,11 +4,20 @@ collects tools, and routes tool calls to the correct server.
 
 Supports ${VAR_NAME} templates in mcp_servers.json — values are
 resolved from .env / os.environ at startup.
+
+Virtual display: when VIRTUAL_DISPLAY=true (default) and the OS is Linux,
+Xvfb is started automatically for browser-based MCP servers (rc-devtools,
+playwright, puppeteer). The browser runs normally (not headless) but on an
+invisible virtual screen — the user doesn't see any window on their desktop.
 """
 
 import json
 import os
 import re
+import sys
+import shutil
+import subprocess
+import signal
 from pathlib import Path
 from contextlib import AsyncExitStack
 
@@ -17,6 +26,99 @@ from mcp.client.stdio import stdio_client
 
 import config as app_config
 import display
+
+
+
+_BROWSER_SERVER_KEYWORDS = {"rc-devtools", "playwright", "puppeteer", "browser", "chrome", "devtools"}
+
+_xvfb_process: subprocess.Popen | None = None
+_virtual_display: str | None = None
+
+
+def _is_browser_server(server_name: str) -> bool:
+    """Check if this MCP server needs a browser (by name heuristic)."""
+    name_lower = server_name.lower()
+    return any(kw in name_lower for kw in _BROWSER_SERVER_KEYWORDS)
+
+
+def start_virtual_display() -> str | None:
+    """Start Xvfb virtual display if on Linux and HEADLESS_BROWSER=true.
+
+    Returns the DISPLAY string (e.g. ":99") or None if not applicable.
+    Idempotent — safe to call multiple times.
+    """
+    global _xvfb_process, _virtual_display
+
+    if _virtual_display is not None:
+        return _virtual_display
+
+    if sys.platform != "linux":
+        return None
+
+    if not app_config.VIRTUAL_DISPLAY:
+        return None
+
+    xvfb_path = shutil.which("Xvfb")
+    if not xvfb_path:
+        display.show_warning("Xvfb not found — browser will be visible. Install: apt install xvfb")
+        return None
+
+    display_num = None
+    for num in range(99, 120):
+        lock_file = f"/tmp/.X{num}-lock"
+        if not os.path.exists(lock_file):
+            display_num = num
+            break
+    if display_num is None:
+        display.show_warning("No free display found for Xvfb (tried :99-:119)")
+        return None
+
+    display_str = f":{display_num}"
+
+    try:
+        _xvfb_process = subprocess.Popen(
+            [
+                xvfb_path, display_str,
+                "-screen", "0", "1920x1080x24",
+                "-ac",  
+                "-nolisten", "tcp",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        import time
+        time.sleep(0.5)
+
+        if _xvfb_process.poll() is not None:
+            display.show_warning(f"Xvfb failed to start on {display_str}")
+            _xvfb_process = None
+            return None
+
+        _virtual_display = display_str
+        display.show_info(f"🖥️  Virtual display started: {display_str} (browser will be invisible)")
+        return display_str
+
+    except Exception as e:
+        display.show_warning(f"Failed to start Xvfb: {e}")
+        return None
+
+
+def stop_virtual_display():
+    """Stop the Xvfb process if running."""
+    global _xvfb_process, _virtual_display
+    if _xvfb_process is not None:
+        try:
+            _xvfb_process.send_signal(signal.SIGTERM)
+            _xvfb_process.wait(timeout=5)
+        except Exception:
+            try:
+                _xvfb_process.kill()
+            except Exception:
+                pass
+        _xvfb_process = None
+        if _virtual_display:
+            display.show_info(f"🖥️  Virtual display {_virtual_display} stopped")
+        _virtual_display = None
 
 
 def _resolve_env_vars(value):
@@ -101,9 +203,14 @@ class MCPManager:
                 display.show_mcp_error(server_name, str(e))
 
     async def _connect_server(self, name: str, config: dict) -> None:
-        """Connect to a single MCP server."""
+        """Connect to a single MCP server.
+
+        For browser-based servers (rc-devtools, etc.) when VIRTUAL_DISPLAY=true:
+        - Linux: starts Xvfb virtual display, browser runs on invisible screen
+        - macOS/Windows: injects --headless flag so browser runs without a window
+        """
         command = config.get("command", "")
-        args = config.get("args", [])
+        args = list(config.get("args", []))
         env = config.get("env", None)
 
         if not command:
@@ -112,6 +219,12 @@ class MCPManager:
         server_env = dict(os.environ)
         if env:
             server_env.update(env)
+
+        if _is_browser_server(name) and app_config.VIRTUAL_DISPLAY and sys.platform == "linux":
+            vdisplay = start_virtual_display()
+            if vdisplay:
+                server_env["DISPLAY"] = vdisplay
+                display.show_info(f"  🖥️  {name}: virtual display {vdisplay}")
 
         server_params = StdioServerParameters(
             command=command,
@@ -181,11 +294,19 @@ class MCPManager:
                 parts = []
                 self._last_binary_data = None
                 for item in result.content:
-                    if hasattr(item, "text"):
-                        parts.append(item.text)
-                    elif hasattr(item, "data"):
+                    if hasattr(item, "data") and item.data:
                         self._last_binary_data = item.data
                         parts.append(f"[binary data: {len(item.data)} bytes]")
+                    elif hasattr(item, "text"):
+                        text = item.text or ""
+                        parts.append(text)
+                        if not self._last_binary_data and len(text) > 500:
+                            import re as _re
+                            _m = _re.search(r'data:image/[^;]+;base64,([A-Za-z0-9+/=]{100,})', text)
+                            if _m:
+                                self._last_binary_data = _m.group(1)
+                            elif _re.match(r'^[A-Za-z0-9+/=]{500,}$', text.strip()):
+                                self._last_binary_data = text.strip()
                     else:
                         parts.append(str(item))
                 return "\n".join(parts)
@@ -204,7 +325,7 @@ class MCPManager:
         return len(self.tool_routing)
 
     async def disconnect_all(self) -> None:
-        """Gracefully disconnect from all MCP servers."""
+        """Gracefully disconnect from all MCP servers and stop virtual display."""
         try:
             await self.exit_stack.aclose()
         except Exception as e:
@@ -213,3 +334,4 @@ class MCPManager:
             self.sessions.clear()
             self.server_tools.clear()
             self.tool_routing.clear()
+            stop_virtual_display()

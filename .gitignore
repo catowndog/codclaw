@@ -1,3 +1,5 @@
 .env
 __pycache__
 .claude
+skills/security-review.md
+skills/frontend-design.md
