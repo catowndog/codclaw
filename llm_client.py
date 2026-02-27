@@ -707,6 +707,10 @@ class LLMAgent:
 
     async def _execute_tool(self, tool_name: str, tool_args: dict) -> str:
         """Execute a tool call — route to built-in, MCP, or skills manager."""
+        # Check pause before ANY tool execution
+        if getattr(self, '_check_pause', None):
+            await self._check_pause()
+
         import telegram
         args_str = json.dumps(tool_args, ensure_ascii=False)[:200] if tool_args else ""
         if not any(skip in tool_name for skip in self._TG_SKIP_TOOLS):
@@ -724,8 +728,6 @@ class LLMAgent:
             return result
 
         if self.mcp and self.mcp.is_mcp_tool(tool_name):
-            if getattr(self, '_check_pause', None):
-                await self._check_pause()
             max_retries = 3
             last_error = None
             for attempt in range(1, max_retries + 1):
@@ -745,6 +747,8 @@ class LLMAgent:
                     if attempt < max_retries:
                         display.show_info(f"Retrying in 2s...")
                         await asyncio.sleep(2)
+                        if getattr(self, '_check_pause', None):
+                            await self._check_pause()
             return f"Error after {max_retries} retries: {last_error}"
 
         return f"Unknown tool: {tool_name}"
@@ -889,6 +893,8 @@ class LLMAgent:
 
             response = await self._call_api(system, tools)
 
+            if check_pause:
+                await check_pause()
             if check_interrupt and check_interrupt():
                 display.show_warning("Stop signal detected — finishing current turn...")
 
@@ -943,6 +949,8 @@ class LLMAgent:
                         check_interrupt()
 
                     tool_result = await self._execute_tool(tc["name"], tc["input"])
+                    if check_pause:
+                        await check_pause()
                     display.show_tool_result(tc["name"], str(tool_result))
                     tool_results.append({
                         "type": "tool_result",
