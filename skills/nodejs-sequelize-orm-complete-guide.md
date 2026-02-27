@@ -1,4 +1,4 @@
-Comprehensive guide to using Sequelize ORM in Node.js with PostgreSQL, MySQL, and SQLite3 — including setup, models, migrations, associations, queries, transactions, hooks, scopes, and production best practices.
+Comprehensive guide to using Sequelize ORM in Node.js with PostgreSQL, MySQL, and SQLite3 — including setup, models, migrations, associations, queries, transactions, hooks, scopes, indexing strategies, and production best practices.
 
 ---
 
@@ -20,14 +20,15 @@ Comprehensive guide to using Sequelize ORM in Node.js with PostgreSQL, MySQL, an
 12. [Hooks (Lifecycle Events)](#hooks-lifecycle-events)
 13. [Scopes](#scopes)
 14. [Validation & Constraints](#validation--constraints)
-15. [Raw Queries](#raw-queries)
-16. [Connection Pooling & Performance](#connection-pooling--performance)
-17. [Database-Specific Notes](#database-specific-notes)
-18. [Why NOT MongoDB](#why-not-mongodb)
-19. [Project Structure Best Practices](#project-structure-best-practices)
-20. [Common Pitfalls & Troubleshooting](#common-pitfalls--troubleshooting)
-21. [Security Considerations](#security-considerations)
-22. [Real-World Scenarios](#real-world-scenarios)
+15. [Indexing Strategies](#indexing-strategies)
+16. [Raw Queries](#raw-queries)
+17. [Connection Pooling & Performance](#connection-pooling--performance)
+18. [Database-Specific Notes](#database-specific-notes)
+19. [Why NOT MongoDB](#why-not-mongodb)
+20. [Project Structure Best Practices](#project-structure-best-practices)
+21. [Common Pitfalls & Troubleshooting](#common-pitfalls--troubleshooting)
+22. [Security Considerations](#security-considerations)
+23. [Real-World Scenarios](#real-world-scenarios)
 
 ---
 
@@ -335,8 +336,11 @@ User.init(
     indexes: [
       { unique: true, fields: ['email'] },
       { fields: ['role'] },
-      { fields: ['is_active', 'role'] },
+      { fields: ['is_active', 'role'] },       // composite: filters by active+role
       { fields: ['last_login_at'] },
+      { fields: ['created_at'] },              // for ORDER BY createdAt
+      { fields: ['is_active', 'created_at'] }, // for scoped + sorted queries
+      { fields: ['deleted_at'] },              // paranoid soft-delete lookups
     ],
   }
 );
@@ -385,6 +389,17 @@ const Post = sequelize.define(
     timestamps: true,
     paranoid: true,
     underscored: true,
+    indexes: [
+      { unique: true, fields: ['slug'] },
+      { fields: ['status'] },
+      { fields: ['user_id'] },                       // FK: belongsTo User
+      { fields: ['status', 'published_at'] },         // published posts sorted by date
+      { fields: ['user_id', 'status'] },              // user's posts filtered by status
+      { fields: ['created_at'] },                     // ORDER BY
+      { fields: ['view_count'] },                     // sorting by popularity
+      { fields: ['user_id', 'created_at'] },          // user's posts sorted by date
+      { fields: ['deleted_at'] },                     // paranoid lookups
+    ],
   }
 );
 
@@ -1060,10 +1075,15 @@ module.exports = {
       },
     });
 
-    // Add indexes
+    // Add indexes — cover every WHERE, JOIN, and ORDER BY pattern
     await queryInterface.addIndex('users', ['email'], { unique: true });
     await queryInterface.addIndex('users', ['role']);
     await queryInterface.addIndex('users', ['is_active']);
+    await queryInterface.addIndex('users', ['is_active', 'role']);
+    await queryInterface.addIndex('users', ['last_login_at']);
+    await queryInterface.addIndex('users', ['created_at']);
+    await queryInterface.addIndex('users', ['deleted_at']);
+    await queryInterface.addIndex('users', ['is_active', 'created_at']);
   },
 
   async down(queryInterface, Sequelize) {
@@ -1463,6 +1483,591 @@ try {
 
 ---
 
+## Indexing Strategies
+
+> **Core principle:** Every `WHERE` clause, `JOIN` condition, and `ORDER BY` column in your application queries should be backed by a database index. Create indexes proactively when defining models and migrations — not reactively after performance degrades.
+
+### Index Types Overview
+
+| Index Type | Syntax | Use Case |
+|---|---|---|
+| Single column | `{ fields: ['email'] }` | Exact match, range filters on one column |
+| Composite | `{ fields: ['status', 'created_at'] }` | Multi-column WHERE + ORDER BY |
+| Unique | `{ unique: true, fields: ['email'] }` | Enforce uniqueness + fast lookups |
+| Partial (PostgreSQL) | `{ where: { is_active: true } }` | Index only matching rows |
+| GIN (PostgreSQL) | `{ using: 'gin', fields: ['tags'] }` | JSONB, ARRAY, full-text search |
+| GiST (PostgreSQL) | `{ using: 'gist' }` | Geometry, ranges, full-text |
+| Expression-based | Via raw migration | Functions, computed values |
+| FULLTEXT (MySQL) | `{ type: 'FULLTEXT' }` | Natural language text search |
+
+### Systematic Indexing by Query Pattern
+
+Use this checklist for every model — map all application query patterns to indexes:
+
+```javascript
+// === MODEL: User ===
+// Query patterns and their required indexes:
+//
+// 1. Login:         WHERE email = ?                    → UNIQUE(email)
+// 2. List active:   WHERE is_active = true             → INDEX(is_active)
+// 3. List by role:  WHERE role = ?                     → INDEX(role)
+// 4. Admin panel:   WHERE is_active = ? AND role = ?   → COMPOSITE(is_active, role)
+// 5. Sort by date:  ORDER BY created_at DESC           → INDEX(created_at)
+// 6. Inactive purge:WHERE last_login_at < ?            → INDEX(last_login_at)
+// 7. Scoped sort:   WHERE is_active = ? ORDER BY created_at → COMPOSITE(is_active, created_at)
+// 8. Soft delete:   WHERE deleted_at IS NULL           → INDEX(deleted_at)
+// 9. Find by name:  WHERE first_name ILIKE ?           → trigram GIN (see below)
+
+User.init({ /* ... */ }, {
+  sequelize,
+  modelName: 'User',
+  tableName: 'users',
+  underscored: true,
+  paranoid: true,
+  indexes: [
+    // Pattern 1: login/lookup by email
+    { unique: true, fields: ['email'] },
+
+    // Pattern 2: filter by active status
+    { fields: ['is_active'] },
+
+    // Pattern 3: filter by role
+    { fields: ['role'] },
+
+    // Pattern 4: admin panel filtering (composite — leftmost prefix serves single-column too)
+    { fields: ['is_active', 'role'] },
+
+    // Pattern 5: pagination sorted by creation date
+    { fields: ['created_at'] },
+
+    // Pattern 6: stale user cleanup
+    { fields: ['last_login_at'] },
+
+    // Pattern 7: active users sorted (covers WHERE + ORDER BY in one scan)
+    { fields: ['is_active', 'created_at'] },
+
+    // Pattern 8: paranoid model — soft delete lookups
+    { fields: ['deleted_at'] },
+  ],
+});
+```
+
+```javascript
+// === MODEL: Post ===
+// Query patterns and their required indexes:
+//
+// 1. Slug lookup:     WHERE slug = ?                           → UNIQUE(slug)
+// 2. By author:       WHERE user_id = ?                        → INDEX(user_id)
+// 3. Feed:            WHERE status = 'published' ORDER BY published_at → COMPOSITE(status, published_at)
+// 4. Author filter:   WHERE user_id = ? AND status = ?         → COMPOSITE(user_id, status)
+// 5. Author timeline: WHERE user_id = ? ORDER BY created_at    → COMPOSITE(user_id, created_at)
+// 6. Popular posts:   ORDER BY view_count DESC                 → INDEX(view_count)
+// 7. Date range:      WHERE published_at BETWEEN ? AND ?       → INDEX(published_at)
+// 8. Search title:    WHERE title ILIKE '%keyword%'           → GIN trigram (see below)
+// 9. Soft delete:     WHERE deleted_at IS NULL                 → INDEX(deleted_at)
+
+Post.init({ /* ... */ }, {
+  sequelize,
+  modelName: 'Post',
+  tableName: 'posts',
+  underscored: true,
+  paranoid: true,
+  indexes: [
+    { unique: true, fields: ['slug'] },
+    { fields: ['user_id'] },
+    { fields: ['status', 'published_at'] },
+    { fields: ['user_id', 'status'] },
+    { fields: ['user_id', 'created_at'] },
+    { fields: ['view_count'] },
+    { fields: ['published_at'] },
+    { fields: ['created_at'] },
+    { fields: ['deleted_at'] },
+  ],
+});
+```
+
+```javascript
+// === MODEL: Comment ===
+// Query patterns:
+// 1. Comments for a post:  WHERE post_id = ? ORDER BY created_at
+// 2. Comments by user:     WHERE user_id = ?
+// 3. Polymorphic:          WHERE commentable_id = ? AND commentable_type = ?
+
+Comment.init({ /* ... */ }, {
+  sequelize,
+  modelName: 'Comment',
+  tableName: 'comments',
+  underscored: true,
+  indexes: [
+    { fields: ['post_id', 'created_at'] },                    // comments for post, sorted
+    { fields: ['user_id'] },                                   // comments by user
+    { fields: ['commentable_type', 'commentable_id'] },        // polymorphic lookup
+    { fields: ['created_at'] },
+  ],
+});
+```
+
+```javascript
+// === JUNCTION TABLE: PostTags ===
+// Query patterns:
+// 1. Tags for post:   WHERE post_id = ?
+// 2. Posts for tag:   WHERE tag_id = ?
+// 3. Unique pair:     (post_id, tag_id) must be unique
+
+PostTag.init({ /* ... */ }, {
+  sequelize,
+  modelName: 'PostTag',
+  tableName: 'post_tags',
+  indexes: [
+    { unique: true, fields: ['post_id', 'tag_id'] },  // prevents duplicates + covers pattern 1
+    { fields: ['tag_id'] },                             // pattern 2 (reverse lookup)
+  ],
+});
+```
+
+### Composite Index Column Order Rules
+
+```javascript
+// === THE LEFT-PREFIX RULE ===
+// A composite index on (A, B, C) serves queries on:
+//   ✅ WHERE A = ?
+//   ✅ WHERE A = ? AND B = ?
+//   ✅ WHERE A = ? AND B = ? AND C = ?
+//   ✅ WHERE A = ? ORDER BY B
+//   ❌ WHERE B = ?           (A is not used — index skipped)
+//   ❌ WHERE C = ?           (A, B not used — index skipped)
+//   ❌ WHERE B = ? AND C = ? (A not used — index skipped)
+
+// === COLUMN ORDER STRATEGY ===
+// 1. Equality filters first  (WHERE status = 'active')
+// 2. Range filters next      (WHERE created_at > ?)
+// 3. ORDER BY columns last   (ORDER BY created_at DESC)
+
+// Example: "published posts sorted by date, paginated"
+// Query: WHERE status = 'published' AND deleted_at IS NULL ORDER BY published_at DESC LIMIT 20
+// Index: (status, published_at) — equality col first, sort col second
+{ fields: ['status', 'published_at'] }
+
+// Example: "user's posts of a specific status, sorted by date"
+// Query: WHERE user_id = ? AND status = ? ORDER BY created_at DESC
+// Index: (user_id, status, created_at)
+{ fields: ['user_id', 'status', 'created_at'] }
+```
+
+### Partial Indexes (PostgreSQL)
+
+```javascript
+// Index only the rows you actually query — smaller, faster, less storage
+{
+  indexes: [
+    // Only index published posts (draft/archived won't bloat the index)
+    {
+      fields: ['published_at'],
+      where: { status: 'published' },
+      name: 'idx_posts_published_date',
+    },
+
+    // Only index active users
+    {
+      fields: ['role', 'created_at'],
+      where: { is_active: true },
+      name: 'idx_users_active_role_created',
+    },
+
+    // Only non-deleted rows (paranoid models — skip soft-deleted)
+    {
+      fields: ['email'],
+      unique: true,
+      where: { deleted_at: null },
+      name: 'idx_users_email_alive',
+    },
+  ],
+}
+```
+
+### GIN Indexes for JSONB, ARRAY & Full-Text (PostgreSQL)
+
+```javascript
+// In model definition
+{
+  indexes: [
+    // GIN index on JSONB — supports @>, ?, ?|, ?& operators
+    {
+      fields: ['metadata'],
+      using: 'gin',
+      name: 'idx_users_metadata_gin',
+    },
+
+    // GIN index on ARRAY column
+    {
+      fields: ['tags'],
+      using: 'gin',
+      name: 'idx_posts_tags_gin',
+    },
+  ],
+}
+
+// In migration — for trigram search (ILIKE '%keyword%')
+module.exports = {
+  async up(queryInterface, Sequelize) {
+    // Enable pg_trgm extension (once per database)
+    await queryInterface.sequelize.query('CREATE EXTENSION IF NOT EXISTS pg_trgm;');
+
+    // GIN trigram index for ILIKE / LIKE '%keyword%' search
+    await queryInterface.sequelize.query(`
+      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_posts_title_trgm
+      ON posts USING gin (title gin_trgm_ops);
+    `);
+
+    await queryInterface.sequelize.query(`
+      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_posts_content_trgm
+      ON posts USING gin (content gin_trgm_ops);
+    `);
+
+    // GIN index for full-text search with tsvector
+    await queryInterface.sequelize.query(`
+      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_posts_fts
+      ON posts USING gin (to_tsvector('english', title || ' ' || content));
+    `);
+  },
+
+  async down(queryInterface) {
+    await queryInterface.sequelize.query('DROP INDEX IF EXISTS idx_posts_title_trgm;');
+    await queryInterface.sequelize.query('DROP INDEX IF EXISTS idx_posts_content_trgm;');
+    await queryInterface.sequelize.query('DROP INDEX IF EXISTS idx_posts_fts;');
+  },
+};
+```
+
+### FULLTEXT Indexes (MySQL)
+
+```javascript
+// In migration
+module.exports = {
+  async up(queryInterface, Sequelize) {
+    await queryInterface.addIndex('posts', ['title', 'content'], {
+      type: 'FULLTEXT',
+      name: 'idx_posts_fulltext',
+    });
+  },
+  async down(queryInterface) {
+    await queryInterface.removeIndex('posts', 'idx_posts_fulltext');
+  },
+};
+
+// Query using MySQL FULLTEXT
+const results = await sequelize.query(
+  "SELECT * FROM posts WHERE MATCH(title, content) AGAINST(:query IN BOOLEAN MODE)",
+  { replacements: { query: 'nodejs sequelize' }, type: QueryTypes.SELECT, model: Post, mapToModel: true }
+);
+```
+
+### Expression & Functional Indexes (via Migrations)
+
+```javascript
+module.exports = {
+  async up(queryInterface) {
+    // Index on lowercased email (PostgreSQL)
+    await queryInterface.sequelize.query(`
+      CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_users_email_lower
+      ON users (LOWER(email));
+    `);
+
+    // Index on date part of timestamp
+    await queryInterface.sequelize.query(`
+      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_orders_created_date
+      ON orders (DATE(created_at));
+    `);
+
+    // Index on JSONB path
+    await queryInterface.sequelize.query(`
+      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_metadata_level
+      ON users ((metadata->>'level'));
+    `);
+
+    // Index on computed column (year + month)
+    await queryInterface.sequelize.query(`
+      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_posts_year_month
+      ON posts (EXTRACT(YEAR FROM published_at), EXTRACT(MONTH FROM published_at));
+    `);
+  },
+
+  async down(queryInterface) {
+    await queryInterface.sequelize.query('DROP INDEX IF EXISTS idx_users_email_lower;');
+    await queryInterface.sequelize.query('DROP INDEX IF EXISTS idx_orders_created_date;');
+    await queryInterface.sequelize.query('DROP INDEX IF EXISTS idx_users_metadata_level;');
+    await queryInterface.sequelize.query('DROP INDEX IF EXISTS idx_posts_year_month;');
+  },
+};
+```
+
+### Covering Indexes (PostgreSQL INCLUDE)
+
+```javascript
+// Include extra columns in the index so the query is answered entirely from the index
+// (index-only scan — no table heap access)
+module.exports = {
+  async up(queryInterface) {
+    // Query: SELECT id, first_name, email FROM users WHERE role = 'admin' AND is_active = true
+    // The included columns are returned directly from the index
+    await queryInterface.sequelize.query(`
+      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_role_active_covering
+      ON users (role, is_active)
+      INCLUDE (id, first_name, email);
+    `);
+
+    // Query: SELECT id, title FROM posts WHERE user_id = ? AND status = 'published' ORDER BY published_at
+    await queryInterface.sequelize.query(`
+      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_posts_user_status_covering
+      ON posts (user_id, status, published_at)
+      INCLUDE (id, title);
+    `);
+  },
+
+  async down(queryInterface) {
+    await queryInterface.sequelize.query('DROP INDEX IF EXISTS idx_users_role_active_covering;');
+    await queryInterface.sequelize.query('DROP INDEX IF EXISTS idx_posts_user_status_covering;');
+  },
+};
+```
+
+### Foreign Key Indexes
+
+```javascript
+// ⚠️ Sequelize associations create foreign keys but NOT indexes automatically (except PostgreSQL unique constraints)
+// ALWAYS add explicit indexes on all foreign key columns
+
+// In model
+{
+  indexes: [
+    { fields: ['user_id'] },       // belongsTo User
+    { fields: ['category_id'] },   // belongsTo Category
+    { fields: ['parent_id'] },     // self-referencing
+  ],
+}
+
+// In migration — do it right next to the FK creation
+module.exports = {
+  async up(queryInterface, Sequelize) {
+    await queryInterface.createTable('posts', {
+      id: { type: Sequelize.INTEGER, autoIncrement: true, primaryKey: true },
+      user_id: {
+        type: Sequelize.UUID,
+        allowNull: false,
+        references: { model: 'users', key: 'id' },
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      },
+      category_id: {
+        type: Sequelize.INTEGER,
+        allowNull: true,
+        references: { model: 'categories', key: 'id' },
+        onDelete: 'SET NULL',
+      },
+      // ... other columns
+    });
+
+    // Index EVERY foreign key — critical for JOIN performance and cascading deletes
+    await queryInterface.addIndex('posts', ['user_id']);
+    await queryInterface.addIndex('posts', ['category_id']);
+  },
+
+  async down(queryInterface) {
+    await queryInterface.dropTable('posts');
+  },
+};
+```
+
+### Comprehensive Indexing Audit Migration
+
+Use this template to audit and add all missing indexes to an existing database:
+
+```javascript
+// migrations/20240601000000-add-comprehensive-indexes.js
+module.exports = {
+  async up(queryInterface, Sequelize) {
+    // === USERS TABLE ===
+    // Lookup patterns: email, role, active status, login recency, creation date, soft delete
+    await queryInterface.addIndex('users', ['email'], { unique: true, name: 'idx_users_email_unique' });
+    await queryInterface.addIndex('users', ['role'], { name: 'idx_users_role' });
+    await queryInterface.addIndex('users', ['is_active'], { name: 'idx_users_active' });
+    await queryInterface.addIndex('users', ['is_active', 'role'], { name: 'idx_users_active_role' });
+    await queryInterface.addIndex('users', ['is_active', 'created_at'], { name: 'idx_users_active_created' });
+    await queryInterface.addIndex('users', ['last_login_at'], { name: 'idx_users_last_login' });
+    await queryInterface.addIndex('users', ['created_at'], { name: 'idx_users_created' });
+    await queryInterface.addIndex('users', ['deleted_at'], { name: 'idx_users_deleted' });
+
+    // === POSTS TABLE ===
+    // Lookup patterns: slug, author, status, published date, popularity, search, soft delete
+    await queryInterface.addIndex('posts', ['slug'], { unique: true, name: 'idx_posts_slug_unique' });
+    await queryInterface.addIndex('posts', ['user_id'], { name: 'idx_posts_user' });
+    await queryInterface.addIndex('posts', ['status'], { name: 'idx_posts_status' });
+    await queryInterface.addIndex('posts', ['status', 'published_at'], { name: 'idx_posts_status_published' });
+    await queryInterface.addIndex('posts', ['user_id', 'status'], { name: 'idx_posts_user_status' });
+    await queryInterface.addIndex('posts', ['user_id', 'created_at'], { name: 'idx_posts_user_created' });
+    await queryInterface.addIndex('posts', ['view_count'], { name: 'idx_posts_views' });
+    await queryInterface.addIndex('posts', ['published_at'], { name: 'idx_posts_published' });
+    await queryInterface.addIndex('posts', ['created_at'], { name: 'idx_posts_created' });
+    await queryInterface.addIndex('posts', ['deleted_at'], { name: 'idx_posts_deleted' });
+
+    // === COMMENTS TABLE ===
+    await queryInterface.addIndex('comments', ['post_id', 'created_at'], { name: 'idx_comments_post_created' });
+    await queryInterface.addIndex('comments', ['user_id'], { name: 'idx_comments_user' });
+    await queryInterface.addIndex('comments', ['created_at'], { name: 'idx_comments_created' });
+
+    // === JUNCTION: POST_TAGS ===
+    await queryInterface.addIndex('post_tags', ['post_id', 'tag_id'], { unique: true, name: 'idx_post_tags_unique' });
+    await queryInterface.addIndex('post_tags', ['tag_id'], { name: 'idx_post_tags_tag' });
+
+    // === PROFILES TABLE ===
+    await queryInterface.addIndex('profiles', ['user_id'], { unique: true, name: 'idx_profiles_user_unique' });
+
+    // === ORDERS TABLE ===
+    await queryInterface.addIndex('orders', ['user_id'], { name: 'idx_orders_user' });
+    await queryInterface.addIndex('orders', ['status'], { name: 'idx_orders_status' });
+    await queryInterface.addIndex('orders', ['user_id', 'status'], { name: 'idx_orders_user_status' });
+    await queryInterface.addIndex('orders', ['user_id', 'created_at'], { name: 'idx_orders_user_created' });
+    await queryInterface.addIndex('orders', ['created_at'], { name: 'idx_orders_created' });
+
+    // === ORDER_ITEMS TABLE ===
+    await queryInterface.addIndex('order_items', ['order_id'], { name: 'idx_order_items_order' });
+    await queryInterface.addIndex('order_items', ['product_id'], { name: 'idx_order_items_product' });
+
+    // === PRODUCTS TABLE ===
+    await queryInterface.addIndex('products', ['category_id'], { name: 'idx_products_category' });
+    await queryInterface.addIndex('products', ['price'], { name: 'idx_products_price' });
+    await queryInterface.addIndex('products', ['stock'], { name: 'idx_products_stock' });
+    await queryInterface.addIndex('products', ['is_active', 'category_id'], { name: 'idx_products_active_category' });
+  },
+
+  async down(queryInterface) {
+    // Remove all indexes (list in reverse order or by name)
+    const indexes = [
+      ['users', 'idx_users_email_unique'], ['users', 'idx_users_role'],
+      ['users', 'idx_users_active'], ['users', 'idx_users_active_role'],
+      ['users', 'idx_users_active_created'], ['users', 'idx_users_last_login'],
+      ['users', 'idx_users_created'], ['users', 'idx_users_deleted'],
+      ['posts', 'idx_posts_slug_unique'], ['posts', 'idx_posts_user'],
+      ['posts', 'idx_posts_status'], ['posts', 'idx_posts_status_published'],
+      ['posts', 'idx_posts_user_status'], ['posts', 'idx_posts_user_created'],
+      ['posts', 'idx_posts_views'], ['posts', 'idx_posts_published'],
+      ['posts', 'idx_posts_created'], ['posts', 'idx_posts_deleted'],
+      ['comments', 'idx_comments_post_created'], ['comments', 'idx_comments_user'],
+      ['comments', 'idx_comments_created'],
+      ['post_tags', 'idx_post_tags_unique'], ['post_tags', 'idx_post_tags_tag'],
+      ['profiles', 'idx_profiles_user_unique'],
+      ['orders', 'idx_orders_user'], ['orders', 'idx_orders_status'],
+      ['orders', 'idx_orders_user_status'], ['orders', 'idx_orders_user_created'],
+      ['orders', 'idx_orders_created'],
+      ['order_items', 'idx_order_items_order'], ['order_items', 'idx_order_items_product'],
+      ['products', 'idx_products_category'], ['products', 'idx_products_price'],
+      ['products', 'idx_products_stock'], ['products', 'idx_products_active_category'],
+    ];
+
+    for (const [table, name] of indexes) {
+      await queryInterface.removeIndex(table, name).catch(() => {});
+    }
+  },
+};
+```
+
+### Monitoring & Analyzing Index Usage
+
+```javascript
+// === EXPLAIN ANALYZE — verify queries use your indexes ===
+
+// In development, wrap queries in EXPLAIN to see the execution plan
+const [plan] = await sequelize.query(
+  'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM users WHERE role = $1 AND is_active = $2 ORDER BY created_at DESC LIMIT 20',
+  { bind: ['admin', true] }
+);
+console.log(JSON.stringify(plan, null, 2));
+// Look for: "Index Scan" or "Index Only Scan" — good
+// Watch for: "Seq Scan" on large tables — needs an index
+
+// === Find missing indexes (PostgreSQL) ===
+const missingIndexes = await sequelize.query(`
+  SELECT
+    schemaname, relname AS table,
+    seq_scan, seq_tup_read,
+    idx_scan, idx_tup_fetch,
+    n_tup_ins, n_tup_upd, n_tup_del,
+    pg_size_pretty(pg_relation_size(relid)) AS table_size
+  FROM pg_stat_user_tables
+  WHERE seq_scan > idx_scan        -- more seq scans than index scans
+    AND n_live_tup > 10000         -- only tables with substantial rows
+  ORDER BY seq_scan - idx_scan DESC;
+`, { type: QueryTypes.SELECT });
+
+// === Find unused indexes (bloat candidates) ===
+const unusedIndexes = await sequelize.query(`
+  SELECT
+    indexrelid::regclass AS index,
+    relid::regclass AS table,
+    pg_size_pretty(pg_relation_size(indexrelid)) AS index_size,
+    idx_scan AS times_used
+  FROM pg_stat_user_indexes
+  WHERE idx_scan = 0
+    AND indexrelid NOT IN (SELECT conindid FROM pg_constraint WHERE contype IN ('p', 'u'))
+  ORDER BY pg_relation_size(indexrelid) DESC;
+`, { type: QueryTypes.SELECT });
+
+// === Find duplicate/redundant indexes ===
+const duplicateIndexes = await sequelize.query(`
+  SELECT
+    a.indexrelid::regclass AS index_a,
+    b.indexrelid::regclass AS index_b,
+    a.indrelid::regclass AS table,
+    pg_size_pretty(pg_relation_size(a.indexrelid)) AS size_a,
+    pg_size_pretty(pg_relation_size(b.indexrelid)) AS size_b
+  FROM pg_index a
+  JOIN pg_index b ON a.indrelid = b.indrelid
+    AND a.indexrelid != b.indexrelid
+    AND a.indkey::text = LEFT(b.indkey::text, LENGTH(a.indkey::text))
+  WHERE a.indisunique = false;
+`, { type: QueryTypes.SELECT });
+
+// === Sequelize-level query logging with timing ===
+const sequelize = new Sequelize(uri, {
+  logging: (sql, timing) => {
+    console.log(`[${timing}ms] ${sql}`);
+  },
+  benchmark: true, // enables timing parameter in logging
+});
+
+// === MySQL: Check index usage ===
+// EXPLAIN SELECT * FROM users WHERE role = 'admin';
+// SHOW INDEX FROM users;
+```
+
+### Indexing Decision Checklist
+
+```
+For EVERY model/table, answer these questions:
+
+✅ Which columns appear in WHERE clauses?          → Single or composite index
+✅ Which columns appear in JOIN / FK conditions?    → Index on FK columns
+✅ Which columns appear in ORDER BY?                → Index (or composite with WHERE cols)
+✅ Which columns appear in GROUP BY?                → Index on grouped columns
+✅ Which unique constraints exist?                  → Unique index
+✅ Is the model paranoid (soft delete)?             → Index on deleted_at
+✅ Are there LIKE/ILIKE '%keyword%' searches?       → GIN trigram index (PG) / FULLTEXT (MySQL)
+✅ Are there JSONB queries?                         → GIN index on JSONB column
+✅ Are there ARRAY contains/overlap queries?        → GIN index on ARRAY column
+✅ Is this a junction table?                        → Unique composite + reverse FK index
+✅ Do queries combine WHERE + ORDER BY?             → Composite (equality cols, then sort col)
+✅ Are there date range filters?                    → Index on date column
+✅ Are there aggregate queries on specific groups?  → Composite on group + aggregate columns
+
+AVOID over-indexing:
+❌ Don't index columns only used in SELECT (not WHERE/JOIN/ORDER)
+❌ Don't index tiny tables (< 1000 rows — seq scan is faster)
+❌ Don't create duplicate indexes (composite (A,B) already covers WHERE A = ?)
+❌ Monitor unused indexes and drop them — each index slows writes
+```
+
+---
+
 ## Raw Queries
 
 ```javascript
@@ -1550,7 +2155,7 @@ const users = await User.findAll({
   }],
 });
 
-// 4. Use indexes appropriately (defined in model or migration)
+// 4. Use indexes appropriately (see Indexing Strategies section)
 
 // 5. Batch operations
 await User.bulkCreate(largeArray, {
@@ -1595,6 +2200,8 @@ process.on('SIGTERM', async () => {
 - `UPSERT` supported via `ON CONFLICT`
 - Supports `RETURNING` clause natively
 - `ENUM` creates a real PostgreSQL type (may require migration to alter)
+- Supports partial indexes, expression indexes, GIN, GiST, BRIN index types, and covering indexes (`INCLUDE`)
+- Use `CONCURRENTLY` when creating indexes on production tables to avoid locking
 
 ```javascript
 // Full-text search (PostgreSQL)
@@ -1615,6 +2222,9 @@ const results = await Post.findAll({
 - `ENUM` is a column property (easier to alter than PostgreSQL)
 - Set `charset: 'utf8mb4'` for full emoji/unicode support
 - Timezone handling needs `timezone: '+00:00'`
+- Supports `FULLTEXT` indexes for text search
+- No partial indexes — use generated columns as workaround
+- Composite index max key length: 3072 bytes (InnoDB with utf8mb4)
 
 ```javascript
 const sequelize = new Sequelize('db', 'user', 'pass', {
@@ -1638,6 +2248,8 @@ const sequelize = new Sequelize('db', 'user', 'pass', {
 - No `ALTER COLUMN` — Sequelize recreates table under the hood
 - No `ARRAY` or `JSONB` support
 - Limited `ALTER TABLE` (no DROP COLUMN in older SQLite)
+- Indexes work but no partial indexes, no expression indexes, no GIN/GiST
+- Single-column and composite B-tree indexes only
 
 ```javascript
 // In-memory for tests
@@ -1890,6 +2502,47 @@ price: { type: DataTypes.DECIMAL(10, 2) }
 // Note: Sequelize returns DECIMAL values as strings — convert with parseFloat
 ```
 
+### 9. Missing Indexes on Foreign Keys
+
+```javascript
+// ❌ BAD: Association without index — slow JOINs and cascading deletes
+Post.belongsTo(User, { foreignKey: 'userId' });
+// The FK constraint is created, but no index!
+
+// ✅ GOOD: Always index FK columns
+Post.init({ /* ... */ }, {
+  sequelize,
+  indexes: [
+    { fields: ['user_id'] }, // explicit index on FK
+  ],
+});
+
+// Or in migration:
+await queryInterface.addIndex('posts', ['user_id']);
+```
+
+### 10. Queries Not Using Indexes
+
+```javascript
+// ❌ BAD: Function on indexed column prevents index usage
+const users = await User.findAll({
+  where: sequelize.where(
+    sequelize.fn('LOWER', sequelize.col('email')),
+    'john@example.com'
+  ),
+});
+// If index is on `email`, LOWER(email) won't use it!
+
+// ✅ GOOD: Normalize data on write + use plain index
+// (use beforeValidate hook to lowercase email)
+const users = await User.findAll({
+  where: { email: 'john@example.com' }, // uses index directly
+});
+
+// ✅ Or: Create expression index (PostgreSQL)
+// CREATE INDEX idx_users_email_lower ON users (LOWER(email));
+```
+
 ---
 
 ## Security Considerations
@@ -2030,17 +2683,17 @@ app.get('/api/posts/search', async (req, res) => {
 
   if (q) {
     where[Op.or] = [
-      { title: { [Op.iLike]: `%${q}%` } },
-      { content: { [Op.iLike]: `%${q}%` } },
+      { title: { [Op.iLike]: `%${q}%` } },       // uses GIN trigram index
+      { content: { [Op.iLike]: `%${q}%` } },      // uses GIN trigram index
     ];
   }
 
-  if (status) where.status = status;
-  if (authorId) where.userId = authorId;
+  if (status) where.status = status;               // uses idx_posts_status
+  if (authorId) where.userId = authorId;            // uses idx_posts_user
 
   if (from || to) {
     where.publishedAt = {};
-    if (from) where.publishedAt[Op.gte] = new Date(from);
+    if (from) where.publishedAt[Op.gte] = new Date(from);   // uses idx_posts_published
     if (to) where.publishedAt[Op.lte] = new Date(to);
   }
 
@@ -2048,7 +2701,7 @@ app.get('/api/posts/search', async (req, res) => {
     include.push({
       model: Tag,
       as: 'tags',
-      where: { name: { [Op.in]: tags.split(',') } },
+      where: { name: { [Op.in]: tags.split(',') } },  // uses index on tags.name
       through: { attributes: [] },
     });
   }
@@ -2087,7 +2740,7 @@ async function createOrder(userId, items) {
 
     // 2. Process each item
     for (const item of items) {
-      // Lock product row for update
+      // Lock product row for update (uses PK index)
       const product = await Product.findByPk(item.productId, {
         lock: t.LOCK.UPDATE,
         transaction: t,
@@ -2245,6 +2898,15 @@ A.belongsToMany(B, { through: 'AB' });
 await sequelize.transaction(async (t) => {
   await Model.create(data, { transaction: t });
 });
+
+// === INDEXES (in model) ===
+{ indexes: [
+  { unique: true, fields: ['email'] },          // unique lookup
+  { fields: ['user_id'] },                       // FK
+  { fields: ['status', 'created_at'] },           // composite: WHERE + ORDER BY
+  { fields: ['tags'], using: 'gin' },            // GIN for ARRAY/JSONB (PG)
+  { fields: ['email'], where: { deleted_at: null } }, // partial (PG)
+] }
 
 // === CLOSE ===
 await sequelize.close();

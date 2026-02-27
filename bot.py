@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import select
+import signal
 import sys
 import termios
 import time
@@ -637,6 +638,12 @@ async def run_agent():
 
     _setup_terminal()
 
+    # Register SIGINT handler so Ctrl+C works even during async I/O
+    _original_sigint = signal.getsignal(signal.SIGINT)
+    def _sigint_handler(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGINT, _sigint_handler)
+
     try:
         while True:
             if _check_keypress() and not shutdown_mode:
@@ -673,7 +680,7 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
                 mcp_tool_names = [t["name"] for t in mcp.get_all_tools()]
                 system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary)
 
-                response_text = await agent.run_turn(user_msg, system_prompt)
+                response_text = await agent.run_turn(user_msg, system_prompt, check_interrupt=_check_keypress)
             except Exception as e:
                 display.show_error(f"Agent error: {e}")
                 telegram.notify_error(config.AGENT_NAME, str(e))
@@ -731,6 +738,7 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
         display.show_shutdown()
 
     finally:
+        signal.signal(signal.SIGINT, _original_sigint)
         _restore_terminal()
         display.show_stats(stats.format_summary())
         telegram.notify_stop(config.AGENT_NAME, iteration - 1, stats.total_cost)

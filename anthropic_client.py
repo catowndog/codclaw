@@ -4,9 +4,10 @@ Handles SSE streaming, tool use loop, conversation history, auto-compression.
 Compatible with Anthropic API proxies (OpenRouter/FAL translation layer).
 """
 
+import asyncio
 import json
 import os
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -204,6 +205,134 @@ def _parse_sse_response(response: httpx.Response) -> dict:
     }
 
 
+async def _parse_sse_response_async(response: httpx.Response) -> dict:
+    """
+    Async version of SSE parser — uses aiter_lines() so the event loop is not blocked.
+    Keeps the sync _parse_sse_response() above intact for use in bot.py skill creation.
+    """
+    content_blocks: list[dict] = []
+    current_block: dict | None = None
+    stop_reason = None
+    usage = {"input_tokens": 0, "output_tokens": 0}
+    model = config.MODEL
+    msg_id = ""
+
+    debug = config.DEBUG_REQUESTS
+    event_name = ""
+
+    async for line in response.aiter_lines():
+        if not line:
+            continue
+
+        if line.startswith("event: "):
+            event_name = line[7:].strip()
+            continue
+
+        if not line.startswith("data: "):
+            continue
+
+        data_str = line[6:].strip()
+        if data_str == "[DONE]":
+            break
+
+        try:
+            data = json.loads(data_str)
+        except json.JSONDecodeError:
+            if debug:
+                display.show_warning(f"SSE parse error: {data_str[:200]}")
+            continue
+
+        event = event_name or data.get("type", "")
+        event_name = ""
+
+        if debug:
+            display.show_info(f"SSE event={event}, keys={list(data.keys())}")
+
+        if event == "message_start":
+            msg = data.get("message", {})
+            msg_id = msg.get("id", "")
+            model = msg.get("model", model)
+            u = msg.get("usage", {})
+            usage["input_tokens"] = u.get("input_tokens", 0)
+
+        elif event == "content_block_start":
+            if current_block is not None:
+                _flush_block(current_block, content_blocks)
+                current_block = None
+
+            block = data.get("content_block", {})
+            idx = data.get("index", len(content_blocks))
+            current_block = {
+                "type": block.get("type", "text"),
+                "index": idx,
+            }
+            bt = current_block["type"]
+            if bt == "text":
+                current_block["text"] = block.get("text", "")
+            elif bt == "thinking":
+                current_block["thinking"] = block.get("thinking", "")
+                current_block["signature"] = ""
+            elif bt == "tool_use":
+                current_block["id"] = block.get("id", "")
+                current_block["name"] = block.get("name", "")
+                current_block["input_json"] = ""
+
+        elif event == "content_block_delta":
+            delta = data.get("delta", {})
+            dt = delta.get("type", "")
+
+            if current_block is None:
+                if dt == "text_delta":
+                    current_block = {"type": "text", "text": "", "index": data.get("index", 0)}
+                elif dt == "thinking_delta":
+                    current_block = {"type": "thinking", "thinking": "", "signature": "", "index": data.get("index", 0)}
+                elif dt == "input_json_delta":
+                    current_block = {"type": "tool_use", "id": "", "name": "", "input_json": "", "index": data.get("index", 0)}
+                else:
+                    continue
+
+            if dt == "text_delta":
+                current_block["text"] = current_block.get("text", "") + delta.get("text", "")
+            elif dt == "thinking_delta":
+                current_block["thinking"] = current_block.get("thinking", "") + delta.get("thinking", "")
+            elif dt == "signature_delta":
+                current_block["signature"] = current_block.get("signature", "") + delta.get("signature", "")
+            elif dt == "input_json_delta":
+                current_block["input_json"] = current_block.get("input_json", "") + delta.get("partial_json", "")
+
+        elif event == "content_block_stop":
+            if current_block is not None:
+                _flush_block(current_block, content_blocks)
+                current_block = None
+
+        elif event == "message_delta":
+            delta = data.get("delta", {})
+            if "stop_reason" in delta:
+                stop_reason = delta["stop_reason"]
+            u = data.get("usage", {})
+            if "output_tokens" in u:
+                usage["output_tokens"] = u["output_tokens"]
+
+        elif event == "message_stop":
+            pass
+
+    if current_block is not None:
+        _flush_block(current_block, content_blocks)
+
+    if debug:
+        display.show_info(f"Parsed {len(content_blocks)} blocks, stop_reason={stop_reason}")
+
+    return {
+        "id": msg_id,
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": content_blocks,
+        "stop_reason": stop_reason,
+        "usage": usage,
+    }
+
+
 class AnthropicAgent:
     """
     Raw HTTP Anthropic API client with:
@@ -221,7 +350,7 @@ class AnthropicAgent:
         builtin_tools: BuiltinTools | None = None,
         token_stats: TokenStats | None = None,
     ):
-        self.http = httpx.Client(timeout=HTTP_TIMEOUT)
+        self.http = httpx.AsyncClient(timeout=HTTP_TIMEOUT)
         self.mcp = mcp_manager
         self.skills = skills_manager
         self.builtin = builtin_tools
@@ -240,8 +369,8 @@ class AnthropicAgent:
             tools.extend(SKILLS_TOOLS)
         return tools
 
-    def _call_api(self, system: str, tools: list[dict]) -> dict:
-        """Make a streaming API call and return the reconstructed response dict."""
+    async def _call_api(self, system: str, tools: list[dict]) -> dict:
+        """Make an async streaming API call and return the reconstructed response dict."""
         body: dict[str, Any] = {
             "model": config.MODEL,
             "max_tokens": config.MAX_TOKENS,
@@ -266,15 +395,15 @@ class AnthropicAgent:
         last_error = None
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                with self.http.stream("POST", url, json=body, headers=headers) as response:
+                async with self.http.stream("POST", url, json=body, headers=headers) as response:
                     if response.status_code != 200:
-                        error_body = response.read().decode("utf-8", errors="replace")
+                        error_body = (await response.aread()).decode("utf-8", errors="replace")
                         display.show_error(
                             f"HTTP {response.status_code} from {url}\n"
                             f"  Response: {error_body[:1000]}"
                         )
                         raise RuntimeError(f"HTTP {response.status_code}: {error_body[:500]}")
-                    return _parse_sse_response(response)
+                    return await _parse_sse_response_async(response)
             except httpx.ConnectError as e:
                 last_error = e
                 display.show_error(f"Connection refused: {url} — proxy is down?")
@@ -289,14 +418,13 @@ class AnthropicAgent:
 
             display.show_warning(f"Attempt {attempt}/{MAX_RETRIES} failed")
             if attempt < MAX_RETRIES:
-                import time
                 display.show_info(f"Retrying in {RETRY_DELAY}s...")
-                time.sleep(RETRY_DELAY)
+                await asyncio.sleep(RETRY_DELAY)
 
         raise RuntimeError(f"All {MAX_RETRIES} attempts failed. Last error: {last_error}")
 
-    def _call_api_simple(self, system: str, messages: list[dict], max_tokens: int = 4096) -> dict:
-        """Simple non-streaming API call (for compression etc.)."""
+    async def _call_api_simple(self, system: str, messages: list[dict], max_tokens: int = 4096) -> dict:
+        """Simple non-streaming async API call (for compression etc.)."""
         body = {
             "model": config.MODEL,
             "max_tokens": max_tokens,
@@ -309,7 +437,7 @@ class AnthropicAgent:
 
         if config.DEBUG_REQUESTS:
             display.show_info(f"POST {url} (non-stream, max_tokens={max_tokens})")
-        resp = self.http.post(url, json=body, headers=headers, timeout=120)
+        resp = await self.http.post(url, json=body, headers=headers, timeout=120)
         if resp.status_code != 200:
             display.show_error(f"HTTP {resp.status_code} from {url}\n  Response: {resp.text[:1000]}")
             raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:500]}")
@@ -456,8 +584,13 @@ class AnthropicAgent:
 
         return result
 
-    async def run_turn(self, user_content: str, system: str) -> str:
-        """Run a complete agent turn with tool use loop."""
+    async def run_turn(self, user_content: str, system: str, check_interrupt: Callable[[], bool] | None = None) -> str:
+        """Run a complete agent turn with tool use loop.
+
+        Args:
+            check_interrupt: optional callback called between tool calls and after API responses.
+                             Returns True if a graceful stop was requested.
+        """
         self.messages.append({"role": "user", "content": user_content})
 
         tools = self._build_tools()
@@ -466,10 +599,13 @@ class AnthropicAgent:
 
         for loop_idx in range(max_tool_loops):
             if self._should_compress():
-                self._compress_history(system)
+                await self._compress_history(system)
 
-            with display.get_status_context("Thinking..."):
-                response = self._call_api(system, tools)
+            response = await self._call_api(system, tools)
+
+            # Check for interrupt right after API response
+            if check_interrupt and check_interrupt():
+                display.show_warning("Stop signal detected — finishing current turn...")
 
             result = self._process_response(response)
             all_text_parts.extend(result["text_parts"])
@@ -485,6 +621,10 @@ class AnthropicAgent:
 
                 tool_results = []
                 for tc in result["tool_calls"]:
+                    # Check for interrupt between tool calls
+                    if check_interrupt:
+                        check_interrupt()
+
                     tool_result = await self._execute_tool(tc["name"], tc["input"])
                     display.show_tool_result(tc["name"], str(tool_result))
                     tool_results.append({
@@ -538,7 +678,7 @@ class AnthropicAgent:
         threshold = int(self._get_context_window() * COMPRESSION_THRESHOLD)
         return estimated > threshold
 
-    def _compress_history(self, system: str):
+    async def _compress_history(self, system: str):
         if len(self.messages) <= KEEP_RECENT_MESSAGES + 2:
             return
 
@@ -588,7 +728,7 @@ class AnthropicAgent:
             old_conversation = old_conversation[:100_000] + "\n\n... (truncated)"
 
         try:
-            summary_resp = self._call_api_simple(
+            summary_resp = await self._call_api_simple(
                 system=(
                     "You are a conversation summarizer. Preserve ALL important details: "
                     "tasks completed, files modified, commands run, decisions made, errors, "
