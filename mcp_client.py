@@ -167,6 +167,7 @@ class MCPManager:
         self.sessions: dict[str, ClientSession] = {}
         self.server_tools: dict[str, list] = {}
         self.tool_routing: dict[str, tuple[str, str]] = {}
+        self._server_configs: dict[str, dict] = {}  # saved for reconnect
 
     async def connect_all(self) -> None:
         """
@@ -202,6 +203,38 @@ class MCPManager:
             except Exception as e:
                 display.show_mcp_error(server_name, str(e))
 
+    async def reconnect_server(self, server_name: str) -> bool:
+        """Try to reconnect a failed MCP server. Returns True if successful."""
+        if server_name not in self._server_configs:
+            display.show_warning(f"No saved config for MCP server '{server_name}' — cannot reconnect")
+            return False
+
+        display.show_info(f"🔄 Reconnecting MCP server '{server_name}'...")
+
+        # Close old session if it exists
+        old_session = self.sessions.pop(server_name, None)
+        if old_session:
+            try:
+                # Can't easily close individual sessions from exit_stack,
+                # but removing from sessions dict prevents further use
+                pass
+            except Exception:
+                pass
+
+        # Remove old tool routing for this server
+        to_remove = [k for k, (sn, _) in self.tool_routing.items() if sn == server_name]
+        for k in to_remove:
+            del self.tool_routing[k]
+        self.server_tools.pop(server_name, None)
+
+        try:
+            await self._connect_server(server_name, self._server_configs[server_name])
+            display.show_info(f"✅ MCP server '{server_name}' reconnected successfully")
+            return True
+        except Exception as e:
+            display.show_error(f"MCP reconnect failed for '{server_name}': {e}")
+            return False
+
     async def _connect_server(self, name: str, config: dict) -> None:
         """Connect to a single MCP server.
 
@@ -209,6 +242,8 @@ class MCPManager:
         - Linux: starts Xvfb virtual display, browser runs on invisible screen
         - macOS/Windows: injects --headless flag so browser runs without a window
         """
+        self._server_configs[name] = config  # save for reconnect
+
         command = config.get("command", "")
         args = list(config.get("args", []))
         env = config.get("env", None)
@@ -314,7 +349,14 @@ class MCPManager:
                 return str(result)
 
         except Exception as e:
-            return f"Error calling tool {original_name} on {server_name}: {e}"
+            error_msg = str(e).strip() if str(e).strip() else type(e).__name__
+            return f"Error calling tool {original_name} on {server_name}: {error_msg}"
+
+    def get_server_for_tool(self, prefixed_name: str) -> str | None:
+        """Get the server name for a prefixed tool name."""
+        if prefixed_name in self.tool_routing:
+            return self.tool_routing[prefixed_name][0]
+        return None
 
     def is_mcp_tool(self, tool_name: str) -> bool:
         """Check if a tool name belongs to MCP (has server prefix)."""
