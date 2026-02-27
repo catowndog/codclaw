@@ -593,14 +593,12 @@ def _extract_work_description(text: str) -> str:
         return ""
     for line in text.strip().split("\n"):
         line = line.strip()
-        # Skip empty, markdown headers, code fences, bullets with checkmarks
         if not line or len(line) < 15:
             continue
         if line.startswith("```") or line.startswith("---"):
             continue
         if line.startswith("- [x]") or line.startswith("- [X]"):
             continue
-        # Clean markdown formatting
         clean = line.lstrip("#").lstrip("*").lstrip("-").strip()
         if clean and len(clean) >= 10:
             return clean[:200]
@@ -733,7 +731,6 @@ async def run_agent():
     else:
         display.show_info("Telegram notifications: disabled (set TG_BOT_TOKEN + TG_USER_ID in .env)")
 
-    # Start async Telegram poller as background task
     tg_poller_task = None
     if config.TG_BOT_TOKEN:
         tg_poller_task = asyncio.create_task(_telegram_poller())
@@ -767,7 +764,6 @@ async def run_agent():
     _setup_terminal()
     _start_stdin_thread()
 
-    # Register SIGINT handler so Ctrl+C works even during async I/O
     _original_sigint = signal.getsignal(signal.SIGINT)
     def _sigint_handler(signum, frame):
         raise KeyboardInterrupt
@@ -779,7 +775,6 @@ async def run_agent():
                 display.show_warning("Graceful stop requested — sending wrap-up prompt...")
                 shutdown_mode = True
 
-            # Pause loop — wait until resumed
             while _pause_requested and not _stop_requested:
                 await asyncio.sleep(0.5)
                 _check_keypress()
@@ -865,7 +860,6 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
                     display.show_warning("Graceful stop requested — will wrap up next iteration...")
                     shutdown_mode = True
                     break
-                # Respect pause during delay
                 while _pause_requested and not _stop_requested:
                     await asyncio.sleep(0.5)
                     _check_keypress()
@@ -1298,7 +1292,6 @@ Your job is to LISTEN, LEARN, and eventually CREATE detailed skill files.
 LANGUAGE: Always write skills in ENGLISH even if the user speaks another language.
 Be conversational and helpful during training. This is a teaching session, not an autonomous work session."""
 
-    # Start the training conversation
     print()
     iteration = 0
 
@@ -1346,7 +1339,6 @@ Create the skills now."""
             display.show_info("Training complete! Skills have been created/updated.")
             display.show_stats(stats.format_summary())
 
-            # Notify Telegram
             telegram.send(
                 f"📚 <b>Training complete</b>\n\n"
                 f"Topic: {topic}\n"

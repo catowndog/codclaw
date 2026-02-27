@@ -395,8 +395,6 @@ class AnthropicAgent:
         budget = max(config.MAX_TOKENS - 1024, 4096)
         body["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
-        # Tools are NOT sent to the API — Starlark handles tool calls via text
-
         url = _api_url()
         headers = _headers()
 
@@ -612,7 +610,6 @@ class AnthropicAgent:
         all_text_parts = []
         max_starlark_loops = 50
 
-        # Create Starlark executor bound to our tool dispatcher
         executor = StarlarkExecutor(self._execute_tool)
         executor.register_tools(self._get_all_tool_names())
 
@@ -622,7 +619,6 @@ class AnthropicAgent:
 
             response = await self._call_api(system, tools)
 
-            # Check for interrupt right after API response
             if check_interrupt and check_interrupt():
                 display.show_warning("Stop signal detected — finishing current turn...")
 
@@ -631,15 +627,12 @@ class AnthropicAgent:
 
             stop_reason = response.get("stop_reason")
 
-            # Always save assistant message to history
             self.messages.append({"role": "assistant", "content": response["content"]})
 
-            # Check for starlark blocks in text response
             full_text = "\n".join(result["text_parts"])
             starlark_blocks = extract_starlark_blocks(full_text)
 
             if starlark_blocks:
-                # Execute all starlark blocks
                 all_results = []
                 for i, code in enumerate(starlark_blocks):
                     if check_interrupt:
@@ -648,7 +641,6 @@ class AnthropicAgent:
                     display.show_info(f"Executing starlark block {i+1}/{len(starlark_blocks)}...")
                     exec_result = await executor.execute(code)
 
-                    # Display tool calls from this block
                     for call in exec_result.get("call_log", []):
                         display.show_tool_result(call["tool"], call.get("result_preview", "")[:500])
 
@@ -657,17 +649,14 @@ class AnthropicAgent:
 
                     all_results.append(exec_result)
 
-                # Format all results and send back to LLM
                 combined_results = []
                 for i, r in enumerate(all_results):
                     combined_results.append(f"## Block {i+1} Results\n{format_starlark_results(r)}")
 
                 results_msg = "\n\n".join(combined_results)
                 self.messages.append({"role": "user", "content": results_msg})
-                # Continue loop — LLM will see results and may write more starlark
                 continue
 
-            # Also handle native tool_use if any (backward compat during transition)
             if stop_reason == "tool_use" and result["tool_calls"]:
                 tool_results = []
                 for tc in result["tool_calls"]:
@@ -685,7 +674,6 @@ class AnthropicAgent:
                 self.messages.append({"role": "user", "content": tool_results})
                 continue
 
-            # No starlark blocks and no tool calls — check stop reason
             if stop_reason == "end_turn":
                 break
 

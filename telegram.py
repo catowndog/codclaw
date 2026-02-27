@@ -14,7 +14,6 @@ import config
 _last_send_time = 0.0
 _MIN_INTERVAL = 0.5
 
-# --- Sync send functions (used from agent loop, rate-limited) ---
 
 
 def send(text: str, parse_mode: str = "HTML") -> bool:
@@ -62,7 +61,6 @@ def send_file(file_path: str, caption: str = "") -> bool:
         return False
 
 
-# --- Notification helpers ---
 
 
 def notify_start(agent_name: str, project_path: str, model: str, mcp_servers: list[str] = None, tools_count: int = 0, skills_count: int = 0):
@@ -121,7 +119,6 @@ def notify_skill_done(skill_name: str, skill_size: int, first_lines: str = "", f
         send_file(file_path, caption=f"📎 {skill_name}.md")
 
 
-# --- Polling: init + async command polling ---
 
 _last_update_id = 0
 
@@ -143,7 +140,6 @@ def init_polling():
         pass
 
 
-# Keep old sync version for backward compatibility
 def poll_fix_commands() -> list[str]:
     """Legacy sync polling — returns list of /fix texts."""
     result = _parse_updates_sync()

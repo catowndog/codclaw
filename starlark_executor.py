@@ -24,7 +24,6 @@ import json
 from typing import Any, Callable, Awaitable
 
 
-# Safe built-in functions available in Starlark code
 _SAFE_BUILTINS = {
     "len": len,
     "str": str,
@@ -52,7 +51,6 @@ _SAFE_BUILTINS = {
     "None": None,
 }
 
-# String methods that are safe to call
 _SAFE_STR_METHODS = {
     "strip", "lstrip", "rstrip", "split", "rsplit", "join",
     "startswith", "endswith", "find", "rfind", "index", "rindex",
@@ -61,10 +59,8 @@ _SAFE_STR_METHODS = {
     "format", "encode", "decode", "zfill",
 }
 
-# List methods that are safe to call
 _SAFE_LIST_METHODS = {"append", "extend", "insert", "pop", "remove", "sort", "reverse", "copy", "clear", "index", "count"}
 
-# Dict methods that are safe to call
 _SAFE_DICT_METHODS = {"get", "keys", "values", "items", "update", "pop", "setdefault", "copy", "clear"}
 
 
@@ -117,11 +113,9 @@ class StarlarkExecutor:
         self._output = []
         self._call_log = []
 
-        # Add print function
         self._env["print"] = lambda *args, **kwargs: self._output.append(
             " ".join(str(a) for a in args)
         )
-        # Add json helpers
         self._env["json_loads"] = json.loads
         self._env["json_dumps"] = lambda obj, **kw: json.dumps(obj, ensure_ascii=False, **kw)
 
@@ -138,7 +132,6 @@ class StarlarkExecutor:
 
         try:
             await self._exec_body(tree.body)
-            # Filter out builtins from env for return
             user_vars = {
                 k: self._repr_value(v)
                 for k, v in self._env.items()
@@ -228,7 +221,6 @@ class StarlarkExecutor:
             raise _ContinueSignal()
 
         elif isinstance(node, ast.Return):
-            # Return not supported at top level, just evaluate the expression
             if node.value:
                 await self._eval_expr(node.value)
 
@@ -303,14 +295,12 @@ class StarlarkExecutor:
         elif isinstance(node, ast.Attribute):
             value = await self._eval_expr(node.value)
             attr = node.attr
-            # Safety check for method access
             if isinstance(value, str) and attr in _SAFE_STR_METHODS:
                 return getattr(value, attr)
             elif isinstance(value, list) and attr in _SAFE_LIST_METHODS:
                 return getattr(value, attr)
             elif isinstance(value, dict) and attr in _SAFE_DICT_METHODS:
                 return getattr(value, attr)
-            # Allow attribute access on result dicts etc.
             if hasattr(value, attr):
                 return getattr(value, attr)
             raise _StarlarkError(f"Cannot access attribute '{attr}' on {type(value).__name__}")
@@ -339,7 +329,6 @@ class StarlarkExecutor:
             return await self._eval_listcomp(node)
 
         elif isinstance(node, ast.JoinedStr):
-            # f-string
             parts = []
             for val in node.values:
                 if isinstance(val, ast.Constant):
@@ -362,15 +351,12 @@ class StarlarkExecutor:
 
     async def _eval_call(self, node: ast.Call) -> Any:
         """Evaluate a function call — may be a tool call or a builtin."""
-        # Get the function name or method
         if isinstance(node.func, ast.Name):
             func_name = node.func.id
 
-            # Check if it's a tool call
             if func_name in self._tool_names:
                 return await self._call_tool(func_name, node)
 
-            # Check if it's in our environment (builtins, print, etc.)
             if func_name in self._env:
                 func = self._env[func_name]
                 args = [await self._eval_expr(a) for a in node.args]
@@ -380,22 +366,18 @@ class StarlarkExecutor:
             raise _StarlarkError(f"Unknown function: {func_name}")
 
         elif isinstance(node.func, ast.Attribute):
-            # Method call: obj.method(args)
             obj = await self._eval_expr(node.func.value)
             method_name = node.func.attr
 
-            # Tool call with __ prefix (MCP tools like rc-devtools__navigate_page)
             if isinstance(node.func.value, ast.Name):
                 full_name = f"{node.func.value.id}__{method_name}"
                 if full_name in self._tool_names:
                     return await self._call_tool(full_name, node)
 
-            # Regular method call
             method = getattr(obj, method_name, None)
             if method is None:
                 raise _StarlarkError(f"No method '{method_name}' on {type(obj).__name__}")
 
-            # Safety check
             if isinstance(obj, str) and method_name not in _SAFE_STR_METHODS:
                 raise _StarlarkError(f"String method '{method_name}' is not allowed")
             if isinstance(obj, list) and method_name not in _SAFE_LIST_METHODS:
@@ -411,16 +393,11 @@ class StarlarkExecutor:
 
     async def _call_tool(self, tool_name: str, node: ast.Call) -> str:
         """Dispatch a tool call and return the result string."""
-        # Build args dict from positional and keyword arguments
-        # First, get the tool's parameter names from the call
         args = [await self._eval_expr(a) for a in node.args]
         kwargs = {kw.arg: await self._eval_expr(kw.value) for kw in node.keywords}
 
-        # If there's exactly one positional arg and no kwargs, and the tool
-        # expects a primary parameter, pass it as the first required param
         tool_args = dict(kwargs)
         if args:
-            # Common primary parameter names for tools
             _PRIMARY_PARAMS = {
                 "execute_shell": "command",
                 "execute_sql": "query",
@@ -438,7 +415,6 @@ class StarlarkExecutor:
             primary = _PRIMARY_PARAMS.get(tool_name)
             if primary and len(args) >= 1:
                 tool_args[primary] = args[0]
-                # Second positional arg for write_file → content
                 if tool_name == "write_file" and len(args) >= 2:
                     tool_args["content"] = args[1]
                 elif tool_name == "create_skill" and len(args) >= 2:
@@ -446,7 +422,6 @@ class StarlarkExecutor:
                 elif tool_name == "http_request" and len(args) >= 2:
                     tool_args["url"] = args[1]
             elif args:
-                # For MCP tools, use generic arg names
                 for i, arg in enumerate(args):
                     if f"arg{i}" not in tool_args:
                         tool_args[f"arg{i}"] = arg
@@ -468,7 +443,6 @@ class StarlarkExecutor:
         iter_val = await self._eval_expr(gen.iter)
         for item in iter_val:
             self._assign(gen.target, item)
-            # Check ifs
             skip = False
             for if_node in gen.ifs:
                 if not await self._eval_expr(if_node):
@@ -585,7 +559,6 @@ def generate_tool_signatures(tools: list[dict]) -> str:
         params_str = ", ".join(params)
         lines.append(f"def {name}({params_str}) -> str:")
         if desc:
-            # Truncate long descriptions
             short_desc = desc[:120].replace("\n", " ")
             lines.append(f'    """{short_desc}"""')
         lines.append("")
