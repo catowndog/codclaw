@@ -624,14 +624,12 @@ class LLMAgent:
         """
         context_window = self._get_context_window()
         input_estimate = self._estimate_tokens()
-        input_estimate += len(system) // 4  
+        input_estimate += len(system) // 3
         if tools:
-            input_estimate += len(json.dumps(tools)) // 4  #
+            input_estimate += len(json.dumps(tools)) // 3
         MIN_OUTPUT_TOKENS = 64_000
         available = context_window - input_estimate - 2000
         safe = min(config.MAX_TOKENS, max(available, MIN_OUTPUT_TOKENS))
-        if safe < config.MAX_TOKENS:
-            display.show_info(f"Auto-adjusted max_tokens: {config.MAX_TOKENS:,} → {safe:,} (input ~{input_estimate:,} tokens, context {context_window:,})")
         return safe
 
     async def _call_api_anthropic(self, system: str, tools: list[dict]) -> dict:
@@ -672,6 +670,19 @@ class LLMAgent:
                 async with self.http.stream("POST", url, json=body, headers=headers) as response:
                     if response.status_code != 200:
                         error_body = (await response.aread()).decode("utf-8", errors="replace")
+                        if response.status_code == 400 and "context length" in error_body.lower():
+                            import re as _re
+                            m = _re.search(r'requested about (\d+) tokens.*?(\d+) of text input.*?(\d+).*?tool.*?(\d+) in the output', error_body)
+                            if m:
+                                real_input = int(m.group(2)) + int(m.group(3))
+                                context_window = self._get_context_window()
+                                new_max = max(context_window - real_input - 5000, 16_000)
+                                display.show_warning(f"Context overflow — real input: {real_input:,}, reducing max_tokens: {body['max_tokens']:,} → {new_max:,}")
+                                body["max_tokens"] = new_max
+                                if "thinking" in body:
+                                    budget = max(new_max - 8192, 4096)
+                                    body["thinking"]["budget_tokens"] = budget
+                                continue 
                         display.show_error(
                             f"HTTP {response.status_code} from {url}\n"
                             f"  Response: {error_body[:1000]}"
@@ -999,6 +1010,7 @@ class LLMAgent:
         all_text_parts = []
         max_starlark_loops = 50
         self._check_pause = check_pause
+        self._logged_max_tokens = False
 
         executor = StarlarkExecutor(
             self._execute_tool,
@@ -1015,6 +1027,17 @@ class LLMAgent:
                 await self._compress_history(system)
 
             safe = self._calc_safe_max_tokens(system, tools)
+            if safe < config.MAX_TOKENS and not self._logged_max_tokens:
+                self._logged_max_tokens = True
+                context_window = self._get_context_window()
+                input_est = self._estimate_tokens() + len(system) // 4 + (len(json.dumps(tools)) // 4 if tools else 0)
+                msg = f"Auto-adjusted max_tokens: {config.MAX_TOKENS:,} → {safe:,} (input ~{input_est:,}, context {context_window:,})"
+                display.show_info(msg)
+                try:
+                    import telegram as _tg
+                    _tg.send(f"⚙️ {msg}")
+                except Exception:
+                    pass
             if safe < 64_000 and len(self.messages) > KEEP_RECENT_MESSAGES + 2:
                 display.show_warning(f"Input too large — safe_max_tokens={safe:,}, forcing compression...")
                 await self._compress_history(system)
@@ -1064,6 +1087,11 @@ class LLMAgent:
             full_text = "\n".join(result["text_parts"])
             starlark_blocks = extract_starlark_blocks(full_text)
 
+            MAX_BLOCKS = 3
+            if len(starlark_blocks) > MAX_BLOCKS:
+                display.show_warning(f"LLM wrote {len(starlark_blocks)} starlark blocks — truncating to {MAX_BLOCKS} (tell LLM to use ONE block)")
+                starlark_blocks = starlark_blocks[:MAX_BLOCKS]
+
             if starlark_blocks:
                 all_results = []
                 for i, code in enumerate(starlark_blocks):
@@ -1073,7 +1101,11 @@ class LLMAgent:
                         check_interrupt()
 
                     display.show_info(f"Executing starlark block {i+1}/{len(starlark_blocks)}...")
-                    exec_result = await executor.execute(code)
+                    try:
+                        exec_result = await asyncio.wait_for(executor.execute(code), timeout=120)
+                    except asyncio.TimeoutError:
+                        display.show_error(f"Starlark block {i+1} timed out after 120s — skipping")
+                        exec_result = {"success": False, "output": "", "call_log": [], "variables": {}, "error": "Execution timed out after 120s", "messages": [], "output_entries": [], "var_updates": {}}
 
                     for call in exec_result.get("call_log", []):
                         display.show_tool_result(call["tool"], call.get("result_preview", "")[:500])
@@ -1147,7 +1179,7 @@ class LLMAgent:
                                 total_chars += len(v)
                             elif isinstance(v, dict):
                                 total_chars += len(json.dumps(v))
-        return total_chars // 4
+        return total_chars // 3
 
     def _get_context_window(self) -> int:
         for key, window in MODEL_CONTEXT_WINDOWS.items():

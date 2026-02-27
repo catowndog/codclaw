@@ -146,8 +146,20 @@ class StarlarkExecutor:
         self._send_message_fn = send_message_fn
 
     def register_tools(self, tool_names: list[str]):
-        """Register available tool names so they can be called from Starlark code."""
-        self._tool_names = set(tool_names)
+        """Register available tool names so they can be called from Starlark code.
+
+        Also builds a dash→underscore replacement map for tool names that contain
+        dashes (e.g. 'rc-devtools__click' → 'rc_devtools__click') because Python
+        AST can't parse dashes in identifiers.
+        """
+        self._tool_names = set()
+        self._dash_replacements: list[tuple[str, str]] = []
+        for name in tool_names:
+            safe_name = name.replace("-", "_")
+            self._tool_names.add(safe_name)
+            if safe_name != name:
+                self._dash_replacements.append((name, safe_name))
+                self._tool_names.add(name)
 
     async def execute(self, code: str) -> dict:
         """Execute a Starlark code block.
@@ -164,6 +176,15 @@ class StarlarkExecutor:
                 "var_updates": {...},        # vars to persist (from set_var + named output)
             }
         """
+        _prev_user_vars = {}
+        _internal = {"print", "json_loads", "json_dumps", "send_message",
+                     "output", "set_var", "get_var", "get_result", "sleep"}
+        if hasattr(self, '_env') and self._env:
+            for k, v in self._env.items():
+                if (k not in _SAFE_BUILTINS and k not in _internal
+                        and not k.startswith("_") and not callable(v)):
+                    _prev_user_vars[k] = v
+
         self._env = dict(_SAFE_BUILTINS)
         self._output = []
         self._call_log = []
@@ -172,6 +193,9 @@ class StarlarkExecutor:
 
         for name, value in self._var_store.items():
             self._env[f"_{name}"] = value
+
+        for k, v in _prev_user_vars.items():
+            self._env[k] = v
 
         self._env["print"] = lambda *args, **kwargs: self._output.append(
             " ".join(str(a) for a in args)
@@ -186,6 +210,9 @@ class StarlarkExecutor:
         self._env["sleep"] = self._builtin_sleep_sync  
 
         code = _sanitize_code(code)
+
+        for dashed, safe in self._dash_replacements:
+            code = code.replace(dashed, safe)
 
         try:
             tree = ast.parse(code, mode="exec")
@@ -336,6 +363,13 @@ class StarlarkExecutor:
 
         elif isinstance(node, ast.For):
             iter_val = await self._eval_expr(node.iter)
+            if hasattr(iter_val, '__aiter__'):
+                items = []
+                async for item in iter_val:
+                    items.append(item)
+                iter_val = items
+            elif hasattr(iter_val, '__await__') or asyncio.iscoroutine(iter_val):
+                iter_val = await iter_val
             for item in iter_val:
                 self._assign(node.target, item)
                 try:
@@ -582,8 +616,14 @@ class StarlarkExecutor:
                     if f"arg{i}" not in tool_args:
                         tool_args[f"arg{i}"] = arg
 
-        self._output.append(f"[tool:{tool_name}] → calling...")
-        result_str = await self._dispatch(tool_name, tool_args)
+        dispatch_name = tool_name
+        for dashed, safe in self._dash_replacements:
+            if tool_name == safe:
+                dispatch_name = dashed
+                break
+
+        self._output.append(f"[tool:{dispatch_name}] → calling...")
+        result_str = await self._dispatch(dispatch_name, tool_args)
 
         result_preview = str(result_str)[:300]
         ref_id = None
@@ -613,6 +653,11 @@ class StarlarkExecutor:
         result = []
         gen = node.generators[0]
         iter_val = await self._eval_expr(gen.iter)
+        if hasattr(iter_val, '__aiter__'):
+            items = []
+            async for item in iter_val:
+                items.append(item)
+            iter_val = items
         for item in iter_val:
             self._assign(gen.target, item)
             skip = False

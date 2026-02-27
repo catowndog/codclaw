@@ -220,7 +220,6 @@ class MCPManager:
         if env:
             server_env.update(env)
 
-        # Linux + VIRTUAL_DISPLAY: run browser on invisible Xvfb screen
         if _is_browser_server(name) and app_config.VIRTUAL_DISPLAY and sys.platform == "linux":
             vdisplay = start_virtual_display()
             if vdisplay:

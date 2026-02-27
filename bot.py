@@ -427,9 +427,11 @@ You call tools by writing ```starlark code blocks in your response. Each block i
 2. The code is executed — ALL tool calls run and results are collected
 3. You receive a summary of results as a user-message on the next iteration
 4. You can use variables, if/else, for loops, string operations between tool calls
-5. One code block can execute 50+ tool calls with loops and conditions — much cheaper than individual API round-trips
 
-## CRITICAL RULE: NEVER write text response AFTER a ```starlark block in the same message. You don't know the results yet — writing text after code will hallucinate results. Put your text BEFORE the code block, or wait for results and respond in the next iteration.
+## CRITICAL RULES:
+1. **ONE block per response** — write exactly ONE ```starlark block, then STOP. Put ALL tool calls in that single block using variables, loops, conditions. NEVER write multiple ```starlark blocks in one response — extra blocks will be IGNORED.
+2. **No text AFTER code** — NEVER write text after a ```starlark block. You don't know results yet — text after code will hallucinate. Put text BEFORE the block, or wait for next iteration.
+3. **Keep blocks focused** — max 10-15 tool calls per block. If a task needs more, split across iterations: do part 1, get results, then do part 2 in the next response.
 
 ## Example:
 ```starlark
@@ -464,7 +466,7 @@ output("build_result", result)
 
 ## Built-in utility functions (always available, no tool call overhead):
 - `print(...)` — debug output, captured in results for you to see (NOT sent to user)
-- `send_message(text)` — send a real-time message to the user DURING code execution
+- `send_message(text)` — send a message to the operator via Telegram in real-time. USE THIS to report results, send command output/logs, confirm completed actions. When the operator asks to "send", "show", "report", "log" something — ALWAYS use send_message() to deliver it.
 - `output(value)` or `output("name", value)` — explicitly publish a result. When used, suppresses raw tool outputs in the summary to avoid duplication. Named outputs are persisted as variables for next code block.
 - `sleep(seconds)` — async pause (max 30 seconds)
 - `set_var("name", value)` — save a variable to persistent store (available in next code block as `_name`)
@@ -530,24 +532,15 @@ Rules for tasks.md:
 - Read it at the start of every iteration
 - Pick the first `[ ]` task and work on it
 - After completing a task, move it to "Completed" section with a brief result note
-- When all tasks are `[ ]` done, you MUST generate NEW tasks:
-  1. Search the web (web_search) for ideas, best practices, improvements for this type of project
-  2. Browse competitor/reference sites using rc-devtools for UI/UX inspiration
-  3. Review existing code for potential improvements, optimizations, missing tests
-  4. Add 3-5 new meaningful tasks to the "Current" section
-- NEVER say "project is complete" or "all done" — there is ALWAYS more to improve
-- Each task should be specific and actionable, not vague
+- When all tasks are done, re-read .temp/plan.md and generate new tasks FROM THE PLAN (next uncompleted phase/section)
+- If the entire plan is complete — report it via send_message() and wait for new instructions
 
 ## Every Iteration:
-1. **Read tasks**: Open .temp/tasks.md — find the next `[ ]` task
-2. **Read the plan**: Check .temp/plan.md for context (the user's high-level goals)
-3. **Load relevant skills**: Call `list_skills`, then `read_skill` for any applicable skill
-4. **Execute the task**: Use the best combination of tools. Break complex tasks into steps.
-5. **Verify the result**: Run tests, check output, validate files exist and are correct
-6. **Check for missing images**: After any UI/page work — take a screenshot, check if images are placeholder or broken. If so, `generate_image()` immediately. Search code for placeholder URLs (picsum, unsplash, placehold) and replace them.
-7. **Update tasks.md**: Move completed task to "Completed" with result. If no tasks left — generate new ones.
-8. **Update plan.md**: Mark completed plan items with `sed`. NEVER overwrite the entire plan.md.
-9. **End with a DETAILED summary**: List specifically what files were changed, what was built, what was tested. This summary is sent to Telegram.
+1. **Read tasks**: Open .temp/tasks.md — pick the next `[ ]` task
+2. **Execute the task**: Write code, create files, run commands. Focus on BUILDING, not checking.
+3. **Quick verify**: Read back key files you changed, ensure no syntax errors. Run build/start command ONCE to check it works.
+4. **Update tasks.md**: Move completed task to "Completed". Pick next task or generate from plan.md.
+5. **Summary**: List files changed and what was built.
 
 ## ANTI-REPETITION RULE:
 - Before starting any task, READ .temp/tasks.md "Completed" section
@@ -580,31 +573,12 @@ Rules for tasks.md:
 - Capture and analyze both stdout and stderr
 - For long-running processes, set appropriate timeout
 
-## SELF-TESTING (MANDATORY):
-After implementing any feature, you MUST verify it works:
-
-### API Testing:
-- Test EVERY API endpoint you create using execute_shell with curl
-- Example: `curl -s -X POST http://localhost:3000/api/users -H "Content-Type: application/json" -d '{{"name":"test"}}' | head -50`
-- Check status codes: `curl -s -o /dev/null -w "%{{http_code}}" http://localhost:3000/api/health`
-- Test all HTTP methods (GET, POST, PUT, DELETE) for each endpoint
-- Test error cases: missing fields, invalid data, unauthorized access
-- Log all test results
-
-### Visual Testing (Browser):
-- After creating/modifying UI, open it in browser using rc-devtools__navigate_page
-- Take a screenshot with rc-devtools__take_screenshot to verify it looks correct
-- Check for: broken layouts, missing elements, wrong colors, alignment issues
-- **CHECK FOR BROKEN/MISSING IMAGES** — if any `<img>` shows broken icon or placeholder, generate a real image with `generate_image()` and fix the src path
-- Search source code for placeholder URLs: `search_files(pattern="picsum|placehold|unsplash|dummyimage|via.placeholder")` — replace ALL with generated images
-- If something looks wrong — FIX IT immediately, then screenshot again
-- Test on the actual running dev server (start it first with execute_shell)
-
-### Functional Testing:
-- After every feature: run the project's test suite (`npm test`, `pytest`, etc.)
-- If no tests exist: write them first, then run
-- Click through the UI using rc-devtools__click to test interactions
-- Check console errors: rc-devtools__evaluate_script with script: `JSON.stringify(window.__errors || [])`
+## VERIFICATION (keep it quick):
+- After writing code: read the file back, check for obvious errors
+- After backend changes: run the server, hit ONE endpoint with curl to confirm it starts
+- After frontend changes: take ONE screenshot when you finish a whole page (not after every small edit)
+- Do NOT: test every endpoint, test every HTTP method, test error cases, write unit tests (unless the plan asks for it)
+- Do NOT: click through every page, check console errors, do multi-step browser testing (unless debugging a specific bug)
 
 ## IMAGE GENERATION — MANDATORY FOR ALL VISUAL PROJECTS:
 You have a built-in `generate_image(prompt, filename, size)` tool. You MUST use it proactively.
@@ -695,15 +669,17 @@ Your working directory is .temp/ inside PROJECT_PATH. Use it for:
 
 1. **BE AUTONOMOUS** — Make decisions and act. Don't hesitate or ask for clarification.
 2. **USE TOOLS** — Never just describe what should be done. Use tools to actually do it.
-3. **VERIFY EVERYTHING** — After any change, verify it worked (read file, run test, check output).
+3. **QUICK VERIFY** — After writing code, read it back once. Run build/start once. Do NOT loop on testing — build first, verify once, move on.
 4. **MANAGE TASKS** — Maintain .temp/tasks.md as your working task list. Mark completed, add new ones. Update plan.md only with `sed` to mark [x]. NEVER overwrite plan.md.
 5. **HANDLE ERRORS** — Errors are expected. Diagnose, fix, retry. Track in .temp/errors.log.
 6. **NO REPETITION** — Before starting any work, check .temp/tasks.md "Completed" section. NEVER redo completed work. Each iteration MUST produce new unique progress.
-7. **BE THOROUGH** — Don't skip steps. If the plan says "write tests", write actual tests.
+7. **BUILD FAST** — Focus on writing code and creating features. Don't over-engineer, don't add extras not in the plan. Implement → quick check → next task.
 8. **SAVE KNOWLEDGE** — If you solve a hard problem, create a skill for future reference.
 9. **DETAILED REPORTS** — End every iteration with a SPECIFIC summary: which files changed, what was built/fixed, test results. Not vague "made progress" — list concrete actions.
-10. **NEVER STOP, NEVER SAY DONE** — The project is NEVER finished. When tasks run out: search the web for new ideas and improvements (web_search), browse competitor sites via rc-devtools for inspiration, analyze code for optimizations, add new tasks to .temp/tasks.md, and execute them immediately. NEVER output phrases like "project is complete" or "all tasks done".
-11. **GENERATE IMAGES, NOT PLACEHOLDERS** — NEVER use placeholder image URLs (picsum, unsplash, placehold.co, via.placeholder, dummyimage). ALWAYS use `generate_image()` to create real, unique images for the project. After building any page or component with images, take a screenshot — if any image is broken or placeholder, fix it immediately by generating a real one."""
+10. **TASKS FROM PLAN ONLY** — When tasks run out, re-read .temp/plan.md and create tasks for the next uncompleted phase. Do NOT invent random improvements, do NOT browse competitors for ideas, do NOT search web for "best practices". If the entire plan is done — report via send_message() and wait.
+11. **GENERATE IMAGES, NOT PLACEHOLDERS** — NEVER use placeholder image URLs (picsum, unsplash, placehold.co, via.placeholder, dummyimage). ALWAYS use `generate_image()` to create real, unique images for the project. After building any page or component with images, take a screenshot — if any image is broken or placeholder, fix it immediately by generating a real one.
+12. **RESPOND TO OPERATOR** — When you receive an operator message (via /fix or Enter), ALWAYS use `send_message()` to report the result back via Telegram. The operator expects a response. Example: operator says "restart the server and send me the log" → you restart, capture output, call `send_message(output)` to deliver it.
+13. **STICK TO THE PLAN** — ONLY do what is specified in .temp/plan.md. Do NOT add technologies, tools, or infrastructure not mentioned in the plan (Docker, Dockerfile, docker-compose, CI/CD, Kubernetes, nginx configs, Makefile, etc.). If the plan doesn't mention Docker — don't create Dockerfile. If the plan doesn't mention tests — don't write tests. Focus on what's asked, not what you think is "best practice"."""
 
 
 def build_initial_message(plan_content: str, file_listing: str, image_blocks: list[dict] | None = None):
@@ -1032,6 +1008,7 @@ async def run_agent():
 {pending}
 
 Handle this request IMMEDIATELY before continuing with your regular tasks.
+IMPORTANT: Use `send_message()` to report back the results to the operator via Telegram. The operator is waiting for a response — send command output, logs, screenshots, confirmation, etc.
 After completing it, update .temp/tasks.md and continue with your normal workflow."""
             elif iteration == 1 and not agent.messages:
                 user_msg = build_initial_message(plan_content, file_listing, upload_images)
@@ -1048,11 +1025,19 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
 
                 response_text = await agent.run_turn(user_msg, system_prompt, check_interrupt=_check_keypress, check_pause=_wait_if_paused)
             except Exception as e:
+                error_str = str(e)
                 display.show_error(f"Agent error: {e}")
-                telegram.notify_error(config.AGENT_NAME, str(e))
+                telegram.notify_error(config.AGENT_NAME, error_str)
                 if shutdown_mode:
                     display.show_warning("Wrap-up failed — shutting down anyway.")
                     break
+                if "context length" in error_str.lower() or "too many tokens" in error_str.lower():
+                    display.show_warning("Context overflow detected — forcing compression...")
+                    try:
+                        await agent._compress_history(system_prompt)
+                        display.show_info("Compressed. Retrying...")
+                    except Exception as ce:
+                        display.show_error(f"Compression failed: {ce}")
                 display.show_info(f"Retrying in {config.DELAY} seconds...")
                 await asyncio.sleep(config.DELAY)
                 iteration += 1
@@ -1062,6 +1047,10 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
 
             if response_text:
                 config.log_output(response_text)
+
+            if pending and response_text:
+                fix_response = response_text[:3500] if len(response_text) > 3500 else response_text
+                telegram.send(f"📋 <b>Response to your request:</b>\n\n<pre>{pending[:200]}</pre>\n\n{fix_response}")
 
             summary = response_text[:800] if response_text else "(no response)"
             work_desc = _extract_work_description(response_text)
