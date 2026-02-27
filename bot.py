@@ -809,6 +809,11 @@ def _handle_ping():
     telegram.send(f"📡 <b>Ping — last {len(lines)} lines:</b>\n\n<pre>{text[:3500]}</pre>")
 
 
+def _tg_escape(text: str) -> str:
+    """Escape HTML special chars for Telegram <pre> blocks."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _handle_tasks():
     """Send current tasks + what agent is doing now to Telegram."""
     parts = []
@@ -816,7 +821,7 @@ def _handle_tasks():
     last_lines = config.get_output_log(5)
     if last_lines:
         activity = "\n".join(last_lines)
-        parts.append(f"🔨 <b>Now doing:</b>\n<pre>{activity[:500]}</pre>")
+        parts.append(f"🔨 <b>Now doing:</b>\n<pre>{_tg_escape(activity[:500])}</pre>")
 
     tasks_path = os.path.join(config.TEMP_DIR, "tasks.md")
     if os.path.exists(tasks_path):
@@ -824,7 +829,11 @@ def _handle_tasks():
             with open(tasks_path, "r", encoding="utf-8") as f:
                 content = f.read()
             if content.strip():
-                parts.append(f"📋 <b>Tasks:</b>\n<pre>{content[:2500]}</pre>")
+                max_tasks = 3000
+                task_text = _tg_escape(content[:max_tasks])
+                if len(content) > max_tasks:
+                    task_text += "\n... (truncated)"
+                parts.append(f"📋 <b>Tasks:</b>\n<pre>{task_text}</pre>")
             else:
                 parts.append("📋 <b>Tasks:</b> file is empty")
         except Exception as e:

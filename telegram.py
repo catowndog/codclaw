@@ -28,11 +28,20 @@ def send(text: str, parse_mode: str = "HTML") -> bool:
 
     url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/sendMessage"
     if len(text) > 4000:
-        text = text[:4000] + "\n\n... (truncated)"
+        text = text[:4000]
+        open_count = text.lower().count("<pre>")
+        close_count = text.lower().count("</pre>")
+        if open_count > close_count:
+            text += "</pre>"
+        text += "\n\n... (truncated)"
     try:
         resp = httpx.post(url, json={"chat_id": config.TG_USER_ID, "text": text, "parse_mode": parse_mode, "disable_web_page_preview": True}, timeout=10)
         _last_send_time = time.time()
-        return resp.status_code == 200
+        if resp.status_code == 200:
+            return True
+        resp2 = httpx.post(url, json={"chat_id": config.TG_USER_ID, "text": text, "disable_web_page_preview": True}, timeout=10)
+        _last_send_time = time.time()
+        return resp2.status_code == 200
     except Exception:
         _last_send_time = time.time()
         return False
