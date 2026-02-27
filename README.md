@@ -150,7 +150,7 @@ Rate limiting (0.5s between messages) prevents Telegram API throttling.
 ```
 CLI/
 ├── bot.py                # Main entry — agent loop + --create-skill + --update-skill + --training
-├── anthropic_client.py   # Raw HTTP SSE streaming client + Starlark tool loop
+├── llm_client.py         # Multi-provider LLM client (Anthropic + OpenAI) + Starlark tool loop
 ├── starlark_executor.py  # Starlark code parser + executor (AST-based sandbox)
 ├── config.py             # .env loader (override=True)
 ├── builtin_tools.py      # 9 built-in tools

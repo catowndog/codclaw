@@ -1,7 +1,7 @@
 """
-Anthropic API client — raw HTTP requests (no SDK).
+LLM API client — raw HTTP requests (no SDK).
+Supports Anthropic + OpenAI-compatible APIs.
 Handles SSE streaming, Starlark-based tool calling, conversation history, auto-compression.
-Compatible with Anthropic API proxies (OpenRouter/FAL translation layer).
 """
 
 import asyncio
@@ -20,9 +20,9 @@ from stats import TokenStats
 from starlark_executor import StarlarkExecutor, extract_starlark_blocks, generate_tool_signatures, format_starlark_results
 
 MODEL_CONTEXT_WINDOWS = {
-    "claude-opus-4-6": 200_000,
+    "claude-opus-4-6": 1_000_000,
     "claude-opus-4-5": 200_000,
-    "claude-sonnet-4-6": 200_000,
+    "claude-sonnet-4-6": 1_000_000,
     "claude-sonnet-4-5": 200_000,
     "claude-haiku-4-5": 200_000,
 }
@@ -50,6 +50,195 @@ def _headers() -> dict[str, str]:
         "Authorization": f"Bearer {config.ANTHROPIC_API_KEY}",
         "x-api-key": config.ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
+    }
+
+
+
+def _openai_api_url() -> str:
+    """Build the OpenAI chat completions endpoint URL."""
+    base = config.OPENAI_BASE_URL.rstrip("/")
+    if not base.endswith("/chat/completions"):
+        base += "/chat/completions"
+    return base
+
+
+def _openai_headers() -> dict[str, str]:
+    """Build request headers for OpenAI-compatible API."""
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {config.OPENAI_API_KEY}",
+    }
+
+
+def _convert_tools_to_openai(tools: list[dict]) -> list[dict]:
+    """Convert Anthropic tool definitions to OpenAI function calling format."""
+    openai_tools = []
+    for tool in tools:
+        openai_tools.append({
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
+            },
+        })
+    return openai_tools
+
+
+def _convert_messages_to_openai(messages: list[dict], system: str) -> list[dict]:
+    """Convert Anthropic-format messages to OpenAI chat format.
+
+    Anthropic format:
+        [{"role": "user", "content": "..."}, {"role": "assistant", "content": [...blocks...]}]
+    OpenAI format:
+        [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}, ...]
+    """
+    openai_msgs = [{"role": "system", "content": system}]
+
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+
+        if isinstance(content, str):
+            if role == "user":
+                openai_msgs.append({"role": "user", "content": content})
+            else:
+                openai_msgs.append({"role": "assistant", "content": content})
+
+        elif isinstance(content, list):
+            text_parts = []
+            tool_calls_out = []
+            tool_results_out = []
+
+            for block in content:
+                bt = block.get("type", "")
+                if bt == "text":
+                    text_parts.append(block.get("text", ""))
+                elif bt == "thinking":
+                    pass
+                elif bt == "redacted_thinking":
+                    pass
+                elif bt == "tool_use":
+                    tool_calls_out.append({
+                        "id": block.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": block.get("name", ""),
+                            "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
+                        },
+                    })
+                elif bt == "tool_result":
+                    tool_results_out.append({
+                        "role": "tool",
+                        "tool_call_id": block.get("tool_use_id", ""),
+                        "content": str(block.get("content", "")),
+                    })
+
+            if role == "assistant":
+                msg_out = {"role": "assistant", "content": "\n".join(text_parts) if text_parts else None}
+                if tool_calls_out:
+                    msg_out["tool_calls"] = tool_calls_out
+                openai_msgs.append(msg_out)
+            elif role == "user":
+                if tool_results_out:
+                    for tr in tool_results_out:
+                        openai_msgs.append(tr)
+                elif text_parts:
+                    openai_msgs.append({"role": "user", "content": "\n".join(text_parts)})
+                else:
+                    openai_msgs.append({"role": "user", "content": str(content)})
+
+    return openai_msgs
+
+
+async def _parse_sse_openai_async(response: httpx.Response) -> dict:
+    """Parse OpenAI SSE streaming response and convert to our internal Anthropic-like format."""
+    text_content = ""
+    tool_calls: dict[int, dict] = {} 
+    finish_reason = None
+    usage = {"input_tokens": 0, "output_tokens": 0}
+    model = config.get_model()
+
+    async for line in response.aiter_lines():
+        if not line:
+            continue
+        if not line.startswith("data: "):
+            continue
+
+        data_str = line[6:].strip()
+        if data_str == "[DONE]":
+            break
+
+        try:
+            data = json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
+
+        model = data.get("model", model)
+
+        u = data.get("usage")
+        if u:
+            usage["input_tokens"] = u.get("prompt_tokens", usage["input_tokens"])
+            usage["output_tokens"] = u.get("completion_tokens", usage["output_tokens"])
+
+        for choice in data.get("choices", []):
+            delta = choice.get("delta", {})
+            fr = choice.get("finish_reason")
+            if fr:
+                finish_reason = fr
+
+            if "content" in delta and delta["content"]:
+                text_content += delta["content"]
+
+            for tc in delta.get("tool_calls", []):
+                idx = tc.get("index", 0)
+                if idx not in tool_calls:
+                    tool_calls[idx] = {
+                        "id": tc.get("id", f"call_{idx}"),
+                        "name": tc.get("function", {}).get("name", ""),
+                        "arguments": "",
+                    }
+                if tc.get("id"):
+                    tool_calls[idx]["id"] = tc["id"]
+                fn = tc.get("function", {})
+                if fn.get("name"):
+                    tool_calls[idx]["name"] = fn["name"]
+                if fn.get("arguments"):
+                    tool_calls[idx]["arguments"] += fn["arguments"]
+
+    content_blocks = []
+    if text_content:
+        content_blocks.append({"type": "text", "text": text_content})
+
+    for idx in sorted(tool_calls.keys()):
+        tc = tool_calls[idx]
+        try:
+            args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+        except json.JSONDecodeError:
+            args = {}
+        content_blocks.append({
+            "type": "tool_use",
+            "id": tc["id"],
+            "name": tc["name"],
+            "input": args,
+        })
+
+    stop_reason = "end_turn"
+    if finish_reason == "tool_calls":
+        stop_reason = "tool_use"
+    elif finish_reason == "length":
+        stop_reason = "max_tokens"
+    elif finish_reason == "stop":
+        stop_reason = "end_turn"
+
+    return {
+        "id": "",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": content_blocks,
+        "stop_reason": stop_reason,
+        "usage": usage,
     }
 
 
@@ -87,7 +276,7 @@ def _parse_sse_response(response: httpx.Response) -> dict:
     current_block: dict | None = None
     stop_reason = None
     usage = {"input_tokens": 0, "output_tokens": 0}
-    model = config.MODEL
+    model = config.get_model()
     msg_id = ""
 
     debug = config.DEBUG_REQUESTS
@@ -215,7 +404,7 @@ async def _parse_sse_response_async(response: httpx.Response) -> dict:
     current_block: dict | None = None
     stop_reason = None
     usage = {"input_tokens": 0, "output_tokens": 0}
-    model = config.MODEL
+    model = config.get_model()
     msg_id = ""
 
     debug = config.DEBUG_REQUESTS
@@ -334,9 +523,9 @@ async def _parse_sse_response_async(response: httpx.Response) -> dict:
     }
 
 
-class AnthropicAgent:
+class LLMAgent:
     """
-    Raw HTTP Anthropic API client with:
+    Multi-provider LLM API client (Anthropic + OpenAI) with:
     - SSE streaming (no SDK, no timeouts)
     - Agentic tool use loop (MCP + skills + built-in tools)
     - Conversation history management
@@ -379,13 +568,15 @@ class AnthropicAgent:
         return generate_tool_signatures(self._build_tools())
 
     async def _call_api(self, system: str, tools: list[dict]) -> dict:
-        """Make an async streaming API call and return the reconstructed response dict.
+        """Route API call to the configured provider (Anthropic or OpenAI)."""
+        if config.API_PROVIDER == "openai":
+            return await self._call_api_openai(system, tools)
+        return await self._call_api_anthropic(system, tools)
 
-        Note: tools are NO LONGER sent in the API body — the LLM uses Starlark
-        code blocks in text responses to call tools instead.
-        """
+    async def _call_api_anthropic(self, system: str, tools: list[dict]) -> dict:
+        """Make an async streaming Anthropic API call."""
         body: dict[str, Any] = {
-            "model": config.MODEL,
+            "model": config.get_model(),
             "max_tokens": config.MAX_TOKENS,
             "system": system,
             "messages": self.messages,
@@ -395,12 +586,15 @@ class AnthropicAgent:
         budget = max(config.MAX_TOKENS - 1024, 4096)
         body["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
+        if tools:
+            body["tools"] = tools
+
         url = _api_url()
         headers = _headers()
 
         if config.DEBUG_REQUESTS:
             display.show_info(f"POST {url}")
-            display.show_info(f"Auth: ***{config.ANTHROPIC_API_KEY[-8:]}, model={config.MODEL}, max_tokens={config.MAX_TOKENS}")
+            display.show_info(f"Auth: ***{config.ANTHROPIC_API_KEY[-8:]}, model={config.get_model()}, max_tokens={config.MAX_TOKENS}")
 
         last_error = None
         for attempt in range(1, MAX_RETRIES + 1):
@@ -433,10 +627,66 @@ class AnthropicAgent:
 
         raise RuntimeError(f"All {MAX_RETRIES} attempts failed. Last error: {last_error}")
 
+    async def _call_api_openai(self, system: str, tools: list[dict]) -> dict:
+        """Make an async streaming OpenAI-compatible API call.
+
+        Converts messages and tools to OpenAI format, makes the request,
+        and converts the response back to our internal Anthropic-like format.
+        """
+        openai_messages = _convert_messages_to_openai(self.messages, system)
+        openai_tools = _convert_tools_to_openai(tools) if tools else None
+
+        body: dict[str, Any] = {
+            "model": config.get_model(),
+            "max_tokens": config.MAX_TOKENS,
+            "messages": openai_messages,
+            "stream": True,
+        }
+        if openai_tools:
+            body["tools"] = openai_tools
+
+        url = _openai_api_url()
+        headers = _openai_headers()
+
+        if config.DEBUG_REQUESTS:
+            display.show_info(f"POST {url} (OpenAI)")
+            display.show_info(f"Auth: ***{config.OPENAI_API_KEY[-8:]}, model={config.get_model()}")
+
+        last_error = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                async with self.http.stream("POST", url, json=body, headers=headers) as response:
+                    if response.status_code != 200:
+                        error_body = (await response.aread()).decode("utf-8", errors="replace")
+                        display.show_error(
+                            f"HTTP {response.status_code} from {url}\n"
+                            f"  Response: {error_body[:1000]}"
+                        )
+                        raise RuntimeError(f"HTTP {response.status_code}: {error_body[:500]}")
+                    return await _parse_sse_openai_async(response)
+            except httpx.ConnectError as e:
+                last_error = e
+                display.show_error(f"Connection refused: {url}")
+            except httpx.TimeoutException as e:
+                last_error = e
+                display.show_error(f"Timeout connecting to {url}: {e}")
+            except RuntimeError:
+                raise
+            except Exception as e:
+                last_error = e
+                display.show_error(f"Request failed: {type(e).__name__}: {e}")
+
+            display.show_warning(f"Attempt {attempt}/{MAX_RETRIES} failed")
+            if attempt < MAX_RETRIES:
+                display.show_info(f"Retrying in {RETRY_DELAY}s...")
+                await asyncio.sleep(RETRY_DELAY)
+
+        raise RuntimeError(f"All {MAX_RETRIES} attempts failed. Last error: {last_error}")
+
     async def _call_api_simple(self, system: str, messages: list[dict], max_tokens: int = 4096) -> dict:
         """Simple non-streaming async API call (for compression etc.)."""
         body = {
-            "model": config.MODEL,
+            "model": config.get_model(),
             "max_tokens": max_tokens,
             "system": system,
             "messages": messages,
@@ -708,7 +958,7 @@ class AnthropicAgent:
 
     def _get_context_window(self) -> int:
         for key, window in MODEL_CONTEXT_WINDOWS.items():
-            if key in config.MODEL:
+            if key in config.get_model():
                 return window
         return DEFAULT_CONTEXT_WINDOW
 

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import config
 import display
-from anthropic_client import AnthropicAgent
+from llm_client import LLMAgent
 from builtin_tools import BuiltinTools, BUILTIN_TOOLS
 from mcp_client import MCPManager
 from site_researcher import research_sites, get_reference_reports_summary
@@ -700,7 +700,7 @@ async def run_agent():
     skills_list = skills.list_skills()
     builtin_count = len(BUILTIN_TOOLS)
     display.show_config(
-        model=config.MODEL,
+        model=config.get_model(),
         project_path=config.PROJECT_PATH,
         effort=config.EFFORT,
         mcp_tools_count=mcp.get_tool_count(),
@@ -725,7 +725,7 @@ async def run_agent():
         mcp_server_names = list(mcp.sessions.keys()) if mcp.sessions else []
         total_tools = builtin_count + mcp.get_tool_count() + 3
         telegram.notify_start(
-            config.AGENT_NAME, config.PROJECT_PATH, config.MODEL,
+            config.AGENT_NAME, config.PROJECT_PATH, config.get_model(),
             mcp_servers=mcp_server_names, tools_count=total_tools, skills_count=len(skills_list),
         )
     else:
@@ -735,8 +735,8 @@ async def run_agent():
     if config.TG_BOT_TOKEN:
         tg_poller_task = asyncio.create_task(_telegram_poller())
 
-    stats = TokenStats(model=config.MODEL)
-    agent = AnthropicAgent(mcp_manager=mcp, skills_manager=skills, builtin_tools=builtin, token_stats=stats)
+    stats = TokenStats(model=config.get_model())
+    agent = LLMAgent(mcp_manager=mcp, skills_manager=skills, builtin_tools=builtin, token_stats=stats)
 
     if config.REFERENCE_SITES:
         await research_sites(agent, config.REFERENCE_SITES, config.TEMP_DIR)
@@ -887,7 +887,7 @@ async def create_skill_mode(description: str):
     Create a new skill file using Claude.
     Uses raw HTTP API (no SDK).
     """
-    from anthropic_client import _api_url, _headers, _parse_sse_response
+    from llm_client import _api_url, _headers, _parse_sse_response
 
     display.show_banner(config.AGENT_NAME)
     display.show_info(f"Creating skill: {description}")
@@ -920,7 +920,7 @@ Then an empty line, then the full skill content starting with the one-line descr
 
     budget = max(config.MAX_TOKENS - 1024, 4096)
     body = {
-        "model": config.MODEL,
+        "model": config.get_model(),
         "max_tokens": config.MAX_TOKENS,
         "thinking": {"type": "enabled", "budget_tokens": budget},
         "system": system_prompt,
@@ -936,7 +936,7 @@ Then an empty line, then the full skill content starting with the one-line descr
     hdrs = _headers()
     if config.DEBUG_REQUESTS:
         display.show_info(f"POST {url}")
-        display.show_info(f"Auth: ***{config.ANTHROPIC_API_KEY[-8:]}, model={config.MODEL}")
+        display.show_info(f"Auth: ***{config.ANTHROPIC_API_KEY[-8:]}, model={config.get_model()}")
 
     max_retries = 3
     response = None
@@ -1090,7 +1090,7 @@ async def update_skill_mode():
     """
     Interactively select a skill, enter modification prompt, and update it via Claude.
     """
-    from anthropic_client import _api_url, _headers, _parse_sse_response
+    from llm_client import _api_url, _headers, _parse_sse_response
 
     display.show_banner(config.AGENT_NAME)
     display.show_info("Update skill mode")
@@ -1157,7 +1157,7 @@ Apply the changes and return the COMPLETE updated skill file content."""
 
     budget = max(config.MAX_TOKENS - 1024, 4096)
     body = {
-        "model": config.MODEL,
+        "model": config.get_model(),
         "max_tokens": config.MAX_TOKENS,
         "thinking": {"type": "enabled", "budget_tokens": budget},
         "system": system_prompt,
@@ -1248,7 +1248,7 @@ async def training_mode(topic: str):
     Interactive training mode — user teaches the agent about a topic,
     and the agent creates/updates skill files based on what it learns.
     """
-    from anthropic_client import AnthropicAgent
+    from llm_client import LLMAgent
 
     display.show_banner(config.AGENT_NAME)
     display.show_info(f"Training mode: [bold]{topic}[/bold]")
@@ -1258,8 +1258,8 @@ async def training_mode(topic: str):
     display.show_info("")
 
     skills = SkillsManager(config.SKILLS_DIR)
-    stats = TokenStats(model=config.MODEL)
-    agent = AnthropicAgent(skills_manager=skills, token_stats=stats)
+    stats = TokenStats(model=config.get_model())
+    agent = LLMAgent(skills_manager=skills, token_stats=stats)
 
     existing_skills = skills.get_skills_summary()
 

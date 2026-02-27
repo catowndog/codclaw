@@ -112,7 +112,7 @@ async def research_sites(agent, reference_sites: list[str], temp_dir: str):
     Skips sites that already have a report (cache).
 
     Args:
-        agent: AnthropicAgent instance (with MCP connected)
+        agent: LLMAgent instance (with MCP connected)
         reference_sites: List of URLs to research
         temp_dir: Path to .temp/ directory
     """
