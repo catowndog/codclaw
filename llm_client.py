@@ -5,6 +5,7 @@ Handles SSE streaming, Starlark-based tool calling, conversation history, auto-c
 """
 
 import asyncio
+import hashlib
 import json
 import os
 from typing import Any, Callable
@@ -1048,6 +1049,13 @@ class LLMAgent:
         self._check_pause = check_pause
         self._logged_max_tokens = False
 
+        # Anti-repetition tracking
+        _recent_action_hashes: list[str] = []
+        _MAX_REPEAT_COUNT = 3
+        _empty_tool_retries = 0
+        _thinking_only_retries = 0
+        _max_tokens_continues = 0
+
         executor = StarlarkExecutor(
             self._execute_tool,
             var_store=self._var_store,
@@ -1115,6 +1123,12 @@ class LLMAgent:
             stop_reason = response.get("stop_reason")
 
             if dropped_tool_names and not valid_tool_calls and stop_reason == "tool_use":
+                _empty_tool_retries += 1
+                if _empty_tool_retries >= 2:
+                    display.show_warning(f"Empty tool calls repeated {_empty_tool_retries}x — breaking out of retry loop")
+                    self.messages.append({"role": "assistant", "content": response["content"]})
+                    self.messages.append({"role": "user", "content": "Your tool calls keep getting truncated with empty input. Stop retrying the same approach — try a simpler tool call, split into smaller steps, or move to the next task."})
+                    break
                 display.show_warning("All tool calls had empty input — requesting retry...")
                 self.messages.append({"role": "assistant", "content": response["content"]})
                 self.messages.append({"role": "user", "content": f"Your tool call(s) were truncated and had empty input: {', '.join(dropped_tool_names)}. Please retry — call the tool(s) again with the correct arguments."})
@@ -1122,6 +1136,10 @@ class LLMAgent:
 
             if (result["has_thinking"] and not result["text_parts"]
                     and not result["tool_calls"] and stop_reason == "end_turn"):
+                _thinking_only_retries += 1
+                if _thinking_only_retries >= 2:
+                    display.show_warning(f"Thinking-only response repeated {_thinking_only_retries}x — breaking out")
+                    break
                 display.show_warning("Response contained only thinking — requesting continuation...")
                 self.messages.append({"role": "assistant", "content": response["content"]})
                 self.messages.append({"role": "user", "content": "Continue — provide your actual response with tool calls or text."})
@@ -1136,6 +1154,34 @@ class LLMAgent:
             if len(starlark_blocks) > MAX_BLOCKS:
                 display.show_warning(f"LLM wrote {len(starlark_blocks)} starlark blocks — truncating to {MAX_BLOCKS} (tell LLM to use ONE block)")
                 starlark_blocks = starlark_blocks[:MAX_BLOCKS]
+
+            # --- Anti-repetition: fingerprint this action ---
+            if starlark_blocks:
+                action_fingerprint = hashlib.md5("".join(starlark_blocks).strip().encode()).hexdigest()
+            elif result["tool_calls"]:
+                tc_sig = "|".join(f"{tc['name']}:{json.dumps(tc['input'], sort_keys=True)}" for tc in result["tool_calls"])
+                action_fingerprint = hashlib.md5(tc_sig.encode()).hexdigest()
+            else:
+                action_fingerprint = None
+
+            if action_fingerprint:
+                _recent_action_hashes.append(action_fingerprint)
+                # Check if last N actions are all identical
+                if len(_recent_action_hashes) >= _MAX_REPEAT_COUNT:
+                    last_n = _recent_action_hashes[-_MAX_REPEAT_COUNT:]
+                    if len(set(last_n)) == 1:
+                        display.show_warning(
+                            f"🔁 Repetition detected: same action repeated {_MAX_REPEAT_COUNT}x in a row — breaking loop"
+                        )
+                        self.messages.append({"role": "user", "content": (
+                            "⚠️ REPETITION DETECTED: You have been performing the EXACT SAME action "
+                            f"{_MAX_REPEAT_COUNT} times in a row. You are stuck in a loop. "
+                            "STOP repeating this action. Either:\n"
+                            "1. Try a completely DIFFERENT approach to solve the problem\n"
+                            "2. Skip this task and move to the next one in tasks.md\n"
+                            "3. If something is failing, diagnose the root cause instead of retrying blindly"
+                        )})
+                        break
 
             if starlark_blocks:
                 all_results = []
@@ -1198,6 +1244,10 @@ class LLMAgent:
                 break
 
             elif stop_reason in ("max_tokens", "pause_turn"):
+                _max_tokens_continues += 1
+                if _max_tokens_continues >= 3:
+                    display.show_warning(f"max_tokens/pause_turn repeated {_max_tokens_continues}x — breaking to avoid infinite loop")
+                    break
                 display.show_warning(f"Stop reason: {stop_reason} — continuing...")
                 self.messages.append({"role": "user", "content": "Continue from where you left off."})
 
