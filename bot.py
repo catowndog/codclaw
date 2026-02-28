@@ -9,6 +9,7 @@ Modes:
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import queue
@@ -1261,7 +1262,9 @@ async def run_agent():
 
     iteration = 1
     shutdown_mode = False
-    _last_sync_summary = "" 
+    _last_sync_summary = ""
+    _outer_response_hashes: list[str] = []  # anti-repetition: track response fingerprints
+    _outer_repeat_warned = False  # True if we already injected a "you are stuck" message
 
     _original_sigint = signal.getsignal(signal.SIGINT)
     def _sigint_handler(signum, frame):
@@ -1421,6 +1424,17 @@ MANDATORY ACTIONS:
                 else:
                     plan_content = read_plan_file()
                     user_msg = build_continuation_message(plan_content)
+                    # Inject anti-repetition warning if agent is stuck
+                    if _outer_repeat_warned:
+                        stuck_warning = (
+                            "\n\n⚠️⚠️⚠️ REPETITION ALERT: You have produced the SAME response for 3 iterations in a row. "
+                            "You are STUCK in a loop. You MUST change your approach NOW:\n"
+                            "1. Do NOT repeat the same starlark/tool calls you just did\n"
+                            "2. Read .temp/tasks.md — if the current task is failing, SKIP it and move to the next one\n"
+                            "3. If you keep failing at the same thing, write the problem to .temp/errors.log and move on\n"
+                            "4. Try a completely different strategy to accomplish the task\n"
+                        )
+                        user_msg += stuck_warning
 
                 try:
                     skills_summary = skills.get_skills_summary()
@@ -1450,6 +1464,30 @@ MANDATORY ACTIONS:
                     continue
 
                 agent.save_history(config.CONVERSATION_FILE)
+
+                # --- Outer-loop anti-repetition ---
+                if response_text and not pending and not shutdown_mode:
+                    _resp_fingerprint = hashlib.md5(response_text[:1000].encode()).hexdigest()
+                    _outer_response_hashes.append(_resp_fingerprint)
+                    # Keep only the last 5 hashes to limit memory
+                    if len(_outer_response_hashes) > 5:
+                        _outer_response_hashes.pop(0)
+                    # Check if last 3 are identical
+                    if len(_outer_response_hashes) >= 3:
+                        _last3 = _outer_response_hashes[-3:]
+                        if len(set(_last3)) == 1 and not _outer_repeat_warned:
+                            _outer_repeat_warned = True
+                            display.show_warning("🔁 Outer loop repetition: agent produced the same response 3 iterations in a row")
+                            telegram.send("⚠️ <b>Repetition detected</b> — agent stuck, injecting correction prompt")
+                        else:
+                            _outer_repeat_warned = False
+                    elif _outer_repeat_warned:
+                        _outer_repeat_warned = False
+                else:
+                    # Reset on fix/shutdown since context changes significantly
+                    if pending:
+                        _outer_response_hashes.clear()
+                        _outer_repeat_warned = False
 
                 if response_text:
                     config.log_output(response_text)
