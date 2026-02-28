@@ -836,6 +836,8 @@ class LLMAgent:
             for attempt in range(1, max_retries + 1):
                 try:
                     result = await self.mcp.call_tool(tool_name, tool_args)
+                    # Grab binary data immediately (before another agent overwrites it)
+                    self._last_mcp_binary = getattr(self.mcp, '_last_binary_data', None)
                     if getattr(self, '_check_pause', None):
                         await self._check_pause()
                     if isinstance(result, str) and result.startswith("Error"):
@@ -875,6 +877,7 @@ class LLMAgent:
                 if reconnected:
                     try:
                         result = await self.mcp.call_tool(tool_name, tool_args)
+                        self._last_mcp_binary = getattr(self.mcp, '_last_binary_data', None)
                         if isinstance(result, str) and result.startswith("Error"):
                             raise RuntimeError(result)
                         return result
@@ -901,7 +904,7 @@ class LLMAgent:
                                 return
 
                 if self.mcp:
-                    raw = getattr(self.mcp, '_last_binary_data', None)
+                    raw = getattr(self, '_last_mcp_binary', None)
                     if raw:
                         img = base64.b64decode(raw) if isinstance(raw, str) else raw
                         if telegram.send_photo_bytes(img, "📸 Screenshot"):
@@ -944,7 +947,7 @@ class LLMAgent:
         for attempt in range(1, 3):
             try:
                 import time as _time
-                raw = getattr(self.mcp, '_last_binary_data', None) if self.mcp else None
+                raw = getattr(self, '_last_mcp_binary', None) if self.mcp else None
 
                 if not raw and isinstance(result, str):
                     m = re.search(r'data:image/[^;]+;base64,([A-Za-z0-9+/=]+)', result)
@@ -1105,7 +1108,9 @@ class LLMAgent:
             _resp_text = "\n".join(result["text_parts"]).strip()
             if _resp_text:
                 import telegram as _tg
-                _tg.send(f"💬 <b>Response:</b>\n\n{_tg.esc(_resp_text[:600])}")
+                _agent_label = f"Agent {self.agent_id + 1}" if self.agent_id > 0 else ""
+                _prefix = f"💬 <b>{_agent_label}:</b>\n" if _agent_label else "💬 "
+                _tg.send(f"{_prefix}{_tg.md_to_tg(_resp_text[:800])}")
 
             stop_reason = response.get("stop_reason")
 
@@ -1251,7 +1256,8 @@ class LLMAgent:
             f"compressing {len(self.messages) - KEEP_RECENT_MESSAGES} old messages..."
         )
 
-        backup_path = os.path.join(config.TEMP_DIR, "conversation_full.json")
+        _suffix = f"_{self.agent_id + 1}" if self.agent_id > 0 else ""
+        backup_path = os.path.join(config.TEMP_DIR, f"conversation{_suffix}_full.json")
         try:
             os.makedirs(config.TEMP_DIR, exist_ok=True)
             with open(backup_path, "w", encoding="utf-8") as f:
