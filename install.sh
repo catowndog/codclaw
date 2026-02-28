@@ -505,15 +505,12 @@ if [[ "${DO_ENV:-true}" == "true" ]]; then
     cat > "$ENV_FILE" << ENVEOF
 AGENT_NAME=${AGENT_NAME}
 
-# LLM provider: "anthropic" or "openai"
 LLM_API_PROVIDER=${LLM_API_PROVIDER}
-# Image generation provider: "openai", "gemini" or "" (disabled)
 IMAGE_API_PROVIDER=${IMAGE_API_PROVIDER}
 
 MODEL=claude-opus-4-6
-IMAGE_MODEL=gpt-5-image
+IMAGE_MODEL=gemini-2.5-flash-image
 
-# Gemini API (for image generation)
 GEMINI_API_KEY=${GEMINI_API_KEY:-}
 GEMINI_IMAGE_MODEL=${GEMINI_IMAGE_MODEL:-}
 
