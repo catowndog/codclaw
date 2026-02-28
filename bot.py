@@ -51,6 +51,7 @@ _pause_requested = False
 _original_term_settings = None
 _fix_queue: queue.Queue = queue.Queue()
 _current_fix_preview: str | None = None
+_stats = None  # TokenStats instance, set in run_agent()
 _input_queue: queue.Queue = queue.Queue()
 _stdin_thread: threading.Thread | None = None
 _pause_event = threading.Event()
@@ -854,10 +855,22 @@ def _handle_ping():
     """Send last 20 lines of agent output to Telegram."""
     lines = config.get_output_log(20)
     if not lines:
-        telegram.send("📡 <b>Ping:</b> no output yet")
+        telegram.send(
+            f"┌─ 📡 <b>PING</b> ────────────\n"
+            f"│\n"
+            f"│  No output yet\n"
+            f"│\n"
+            f"└───────────────────────"
+        )
         return
     text = "\n".join(lines)
-    telegram.send(f"📡 <b>Ping — last {len(lines)} lines:</b>\n\n<pre>{text[:3500]}</pre>")
+    telegram.send(
+        f"┌─ 📡 <b>PING</b> ── last {len(lines)} lines ──\n"
+        f"│\n"
+        f"<pre>{_tg_escape(text[:3200])}</pre>\n"
+        f"│\n"
+        f"└───────────────────────"
+    )
 
 
 def _tg_escape(text: str) -> str:
@@ -867,12 +880,18 @@ def _tg_escape(text: str) -> str:
 
 def _handle_tasks():
     """Send current tasks + what agent is doing now to Telegram."""
-    parts = []
+    header = (
+        f"┌───────────────────────\n"
+        f"│  📋  <b>TASKS</b>\n"
+        f"└───────────────────────\n"
+    )
+
+    sections = []
 
     last_lines = config.get_output_log(5)
     if last_lines:
         activity = "\n".join(last_lines)
-        parts.append(f"🔨 <b>Now doing:</b>\n<pre>{_tg_escape(activity[:500])}</pre>")
+        sections.append(f"🔨 <b>Now doing:</b>\n<pre>{_tg_escape(activity[:400])}</pre>")
 
     tasks_path = os.path.join(config.TEMP_DIR, "tasks.md")
     if os.path.exists(tasks_path):
@@ -880,48 +899,82 @@ def _handle_tasks():
             with open(tasks_path, "r", encoding="utf-8") as f:
                 content = f.read()
             if content.strip():
-                max_tasks = 3000
+                max_tasks = 2500
                 task_text = _tg_escape(content[:max_tasks])
                 if len(content) > max_tasks:
                     task_text += "\n... (truncated)"
-                parts.append(f"📋 <b>Tasks:</b>\n<pre>{task_text}</pre>")
+                sections.append(f"<pre>{task_text}</pre>")
             else:
-                parts.append("📋 <b>Tasks:</b> file is empty")
+                sections.append("  <i>tasks.md is empty</i>")
         except Exception as e:
-            parts.append(f"📋 <b>Tasks:</b> error: {e}")
+            sections.append(f"  ⚠️ Error: {e}")
     else:
-        parts.append("📋 <b>Tasks:</b> no tasks.md yet")
+        sections.append("  <i>No tasks.md yet</i>")
 
-    telegram.send("\n\n".join(parts) if parts else "📋 No data yet")
+    body = "\n\n".join(sections) if sections else "  <i>No data</i>"
+    telegram.send(f"{header}\n{body}\n\n━━━━━━━━━━━━━━━━━━━━━")
 
 
 def _handle_queue():
     """Send fix queue status to Telegram."""
     size = _fix_queue.qsize()
     if size == 0:
-        telegram.send("📭 Fix queue is empty — agent working on regular tasks.")
+        telegram.send(
+            f"┌─ 📭 <b>QUEUE</b> ───────────\n"
+            f"│\n"
+            f"│  Empty — working on\n"
+            f"│  regular tasks\n"
+            f"│\n"
+            f"└───────────────────────"
+        )
     else:
-        telegram.send(f"📬 Fix queue: <b>{size}</b> fix(es) pending")
+        telegram.send(
+            f"┌─ 📬 <b>QUEUE</b> ───────────\n"
+            f"│\n"
+            f"│  <b>{size}</b> fix(es) pending\n"
+            f"│\n"
+            f"└───────────────────────"
+        )
 
 
 def _handle_status():
     """Send detailed agent status to Telegram."""
-    state = "⏸ PAUSED" if _pause_requested else ("🛑 STOPPING" if _stop_requested else "▶️ RUNNING")
+    state_icon = "⏸" if _pause_requested else ("🛑" if _stop_requested else "▶️")
+    state_text = "PAUSED" if _pause_requested else ("STOPPING" if _stop_requested else "RUNNING")
     queue_size = _fix_queue.qsize()
     current = _current_fix_preview
 
-    parts = [f"ℹ️ <b>Agent status:</b> {state}"]
+    header = (
+        f"┌───────────────────────\n"
+        f"│  📊  <b>DASHBOARD</b>\n"
+        f"└───────────────────────\n"
+    )
+
+    lines = [f"\n  {state_icon}  <b>{state_text}</b>\n"]
 
     if current:
-        parts.append(f"🔧 <b>Current fix:</b> <i>{telegram.esc(current)}</i>")
-
+        lines.append(f"  🔧 Fix: <i>{telegram.esc(current[:100])}</i>")
     if queue_size > 0:
-        parts.append(f"📬 <b>Queue:</b> {queue_size} fix(es) pending")
+        lines.append(f"  📬 Queue: {queue_size} pending")
     else:
-        parts.append("📭 <b>Queue:</b> empty")
+        lines.append(f"  📭 Queue: empty")
 
-    parts.append(f"\n📱 /fix /stop /pause /resume /ping /tasks /queue /status")
-    telegram.send("\n".join(parts))
+    if _stats:
+        def fmt(n):
+            if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
+            elif n >= 1_000: return f"{n/1_000:.0f}K"
+            return str(n)
+
+        lines.append(f"\n───────────────────")
+        lines.append(f"  📈 Tokens: {fmt(_stats.total_input_tokens)} in / {fmt(_stats.total_output_tokens)} out")
+        if _stats.image_generations > 0:
+            lines.append(f"  🎨 Images: {_stats.image_generations}  (${_stats.image_cost:.4f})")
+        lines.append(f"  💰 Total:  ${_stats.total_cost:.4f}")
+        lines.append(f"  ⏱  Uptime: {_stats.elapsed_minutes:.1f} min")
+        lines.append(f"───────────────────")
+
+    lines.append(f"\n📱  /fix  /stop  /pause  /queue  /status")
+    telegram.send(header + "\n".join(lines))
 
 
 async def _wait_if_paused():
@@ -1006,9 +1059,13 @@ async def run_agent():
     os.chdir(config.PROJECT_PATH)
     display.show_info(f"Working directory: {os.getcwd()}")
 
+    global _stats
+    stats = TokenStats(model=config.get_model())
+    _stats = stats
+
     skills = SkillsManager(config.SKILLS_DIR)
     mcp = MCPManager(config.MCP_SERVERS_CONFIG)
-    builtin = BuiltinTools(config.PROJECT_PATH, config.DATABASE_URL)
+    builtin = BuiltinTools(config.PROJECT_PATH, config.DATABASE_URL, token_stats=stats)
 
     display.show_info("Connecting to MCP servers...")
     await mcp.connect_all()
@@ -1051,7 +1108,6 @@ async def run_agent():
         _tg_thread = threading.Thread(target=_telegram_poller_thread, daemon=True, name="tg-poller")
         _tg_thread.start()
 
-    stats = TokenStats(model=config.get_model())
     agent = LLMAgent(mcp_manager=mcp, skills_manager=skills, builtin_tools=builtin, token_stats=stats)
 
     _setup_terminal()
@@ -1147,7 +1203,13 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
                 plan_content = read_plan_file()
                 user_msg = build_resume_message(plan_content)
                 display.show_info("♻️ Resuming from previous session")
-                telegram.send("♻️ <b>Session resumed</b> — continuing from where we left off.")
+                telegram.send(
+                    f"┌───────────────────────\n"
+                    f"│  ♻️  <b>SESSION RESUMED</b>\n"
+                    f"└───────────────────────\n\n"
+                    f"  Continuing previous session...\n"
+                    f"  History restored ✓"
+                )
             else:
                 plan_content = read_plan_file()
                 user_msg = build_continuation_message(plan_content)
@@ -1185,11 +1247,22 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
                 config.log_output(response_text)
 
             if pending and response_text:
-                fix_response = response_text[:3500] if len(response_text) > 3500 else response_text
-                pending_preview = pending[:200] if isinstance(pending, str) else " ".join(b.get("text", "") for b in pending if isinstance(b, dict) and b.get("type") == "text")[:200]
+                fix_response = response_text[:2500] if len(response_text) > 2500 else response_text
+                pending_preview = pending[:150] if isinstance(pending, str) else " ".join(b.get("text", "") for b in pending if isinstance(b, dict) and b.get("type") == "text")[:150]
                 remaining_now = _get_queue_size()
-                queue_note = f"\n\n📋 Queue: {remaining_now} more fix(es) pending" if remaining_now > 0 else ""
-                telegram.send(f"📋 <b>Response to your request:</b>\n\n<pre>{telegram.esc(pending_preview)}</pre>\n\n{telegram.esc(fix_response)}{queue_note}")
+                queue_line = f"\n│\n│  📋 Queue: {remaining_now} more pending" if remaining_now > 0 else ""
+                telegram.send(
+                    f"┌─ ✅ <b>FIX COMPLETED</b> ──────\n"
+                    f"│\n"
+                    f"│  <b>Request:</b>\n"
+                    f"│  <i>{telegram.esc(pending_preview)}</i>\n"
+                    f"│\n"
+                    f"│  <b>Result:</b>\n"
+                    f"│  {telegram.esc(fix_response[:800])}"
+                    f"{queue_line}\n"
+                    f"│\n"
+                    f"└───────────────────────"
+                )
 
             summary = response_text[:800] if response_text else "(no response)"
             work_desc = _extract_work_description(response_text)
@@ -1209,6 +1282,7 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
                 tokens_in=stats.total_input_tokens, tokens_out=stats.total_output_tokens,
                 tasks_preview=tasks_preview,
                 work_description=work_desc,
+                total_cost=stats.total_cost,
             )
 
             if shutdown_mode:
@@ -1243,7 +1317,7 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
         signal.signal(signal.SIGINT, _original_sigint)
         _restore_terminal()
         display.show_stats(stats.format_summary())
-        telegram.notify_stop(config.AGENT_NAME, iteration - 1, stats.total_cost)
+        telegram.notify_stop(config.AGENT_NAME, iteration - 1, stats.total_cost, image_count=stats.image_generations, image_cost=stats.image_cost)
         display.show_info("Saving conversation state...")
         agent.save_history(config.CONVERSATION_FILE)
         display.show_info("Disconnecting MCP servers...")

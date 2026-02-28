@@ -311,9 +311,10 @@ _MAX_OUTPUT = 50_000
 class BuiltinTools:
     """Executes built-in tools: shell, database, file ops, HTTP."""
 
-    def __init__(self, project_path: str, database_url: str = ""):
+    def __init__(self, project_path: str, database_url: str = "", token_stats=None):
         self.project_path = Path(project_path).resolve()
         self.database_url = database_url
+        self.stats = token_stats
 
 
     async def execute_tool(self, tool_name: str, tool_args: dict) -> str:
@@ -931,6 +932,18 @@ class BuiltinTools:
                     return f"Error: Image API returned {resp.status_code}: {resp.text[:500]}"
 
                 data = resp.json()
+
+                # Track image generation cost
+                usage = data.get("usage", {})
+                inp_tokens = usage.get("prompt_tokens", usage.get("input_tokens", 0))
+                out_tokens = usage.get("completion_tokens", usage.get("output_tokens", 0))
+                if inp_tokens or out_tokens:
+                    img_cost = (inp_tokens / 1_000_000) * 5.0 + (out_tokens / 1_000_000) * 15.0
+                else:
+                    img_cost = 0.04  # flat rate fallback per image
+                if self.stats:
+                    self.stats.add_image(img_cost)
+
                 choices = data.get("choices", [])
                 if not choices:
                     return f"Error: No choices in response: {json.dumps(data)[:300]}"
