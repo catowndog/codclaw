@@ -4,6 +4,11 @@
 #  Usage:  sudo bash install.sh
 #          sudo bash install.sh --uninstall
 # ──────────────────────────────────────────────────────────────
+
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
+fi
+
 set -euo pipefail
 
 INSTALL_DIR="/opt/codclaw"
