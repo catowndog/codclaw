@@ -34,7 +34,6 @@ def md_to_tg(text: str) -> str:
 
     text = esc(text)
 
-    # --- Step 1: Extract code blocks into placeholders ---
     _code_blocks = []
 
     def _save_code_block(m):
@@ -48,9 +47,7 @@ def md_to_tg(text: str) -> str:
         _code_blocks.append(code)
         return f"\x00CODE{idx}\x00"
 
-    # Closed code blocks
     text = re.sub(r'```[a-zA-Z_]*\n(.*?)```', _save_code_block, text, flags=re.DOTALL)
-    # Unclosed code block at end
     m = re.search(r'```[a-zA-Z_]*\n(.+)$', text, flags=re.DOTALL)
     if m:
         code = m.group(1).strip()
@@ -62,14 +59,10 @@ def md_to_tg(text: str) -> str:
             _code_blocks.append(code)
             text = text[:m.start()] + f"\x00CODE{idx}\x00"
 
-    # --- Step 2: Apply formatting (only to non-code text) ---
-    # Bold: **text**
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
 
-    # Inline code: `text`
     text = re.sub(r'`([^`]+?)`', r'<i>\1</i>', text)
 
-    # Headings: lines starting with # → bold
     lines = text.split("\n")
     result = []
     for line in lines:
@@ -82,7 +75,6 @@ def md_to_tg(text: str) -> str:
         result.append(line)
     text = "\n".join(result)
 
-    # --- Step 3: Restore code blocks ---
     for i, code in enumerate(_code_blocks):
         text = text.replace(f"\x00CODE{i}\x00", f"<pre>{code}</pre>")
 
