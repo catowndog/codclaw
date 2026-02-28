@@ -951,7 +951,6 @@ def build_sync_summary(agent_results: list[tuple[int, str]]) -> str:
         if text.startswith("Error:"):
             lines.append(f"- Agent {agent_id}: FAILED — {text[:200]}")
             continue
-        # Extract first meaningful line as summary
         preview = ""
         for line in text.strip().split("\n"):
             line = line.strip()
@@ -1227,13 +1226,12 @@ async def run_agent():
         _tg_thread = threading.Thread(target=_telegram_poller_thread, daemon=True, name="tg-poller")
         _tg_thread.start()
 
-    # Create agent(s) — x1 uses single agent, x2/x3/x4 use multiple
     agents = []
     for i in range(config.PARALLEL_AGENTS):
         a = LLMAgent(mcp_manager=mcp, skills_manager=skills, builtin_tools=builtin, token_stats=stats)
         a.agent_id = i
         agents.append(a)
-    agent = agents[0]  # primary agent (backward compat)
+    agent = agents[0] 
 
     if config.PARALLEL_AGENTS > 1:
         display.show_info(f"Parallel mode: [bold cyan]x{config.PARALLEL_AGENTS}[/bold cyan] ({config.PARALLEL_AGENTS} agents)")
@@ -1245,7 +1243,6 @@ async def run_agent():
         await research_sites(agent, config.REFERENCE_SITES, config.TEMP_DIR,
                              check_interrupt=_check_keypress, check_pause=_wait_if_paused)
 
-    # Load conversation histories
     for i, a in enumerate(agents):
         conv_file = config.get_conversation_file(i)
         if os.path.exists(conv_file):
@@ -1273,7 +1270,7 @@ async def run_agent():
 
     iteration = 1
     shutdown_mode = False
-    _last_sync_summary = ""  # sync summary for parallel mode
+    _last_sync_summary = "" 
 
     _original_sigint = signal.getsignal(signal.SIGINT)
     def _sigint_handler(signum, frame):
@@ -1290,38 +1287,32 @@ async def run_agent():
                 await asyncio.sleep(0.5)
                 _check_keypress()
 
-            # --- Parallel mode (x2/x3/x4) ---
             pending = _take_pending_message()
             use_parallel = (
                 config.PARALLEL_AGENTS > 1
                 and not shutdown_mode
                 and not pending
-                and iteration > 1  # first iteration always single (setup)
+                and iteration > 1 
             )
 
             if use_parallel:
                 pending_tasks = parse_pending_tasks()
                 n_agents = min(config.PARALLEL_AGENTS, len(pending_tasks))
                 if n_agents < 2:
-                    use_parallel = False  # not enough tasks, fall back to x1
+                    use_parallel = False 
 
             if use_parallel:
-                # ═══════════════════════════════════════
-                # PARALLEL ITERATION (x2/x3/x4)
-                # ═══════════════════════════════════════
                 display.show_parallel_iteration_header(iteration, n_agents)
                 config.log_output(f"--- Iteration #{iteration} (x{n_agents} parallel) ---")
 
                 plan_content = read_plan_file()
 
-                # Refresh system prompt
                 skills_summary = skills.get_skills_summary()
                 mcp_tool_names = [t["name"] for t in mcp.get_all_tools()]
                 tool_sigs = agent.get_starlark_tool_signatures()
                 codes_summary = get_codes_summary()
                 system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary, tool_signatures=tool_sigs, codes_summary=codes_summary)
 
-                # Build per-agent messages and launch concurrently
                 assigned_tasks = pending_tasks[:n_agents]
                 display.show_info(f"Assigning {n_agents} tasks to {n_agents} agents:")
                 for i, task in enumerate(assigned_tasks):
@@ -1341,11 +1332,9 @@ async def run_agent():
                         agents[i].run_turn(msg_i, system_prompt, check_interrupt=_check_keypress, check_pause=_wait_if_paused)
                     )
 
-                # Run all agents concurrently
                 display.show_info(f"Running {n_agents} agents in parallel...")
                 results = await asyncio.gather(*coroutines, return_exceptions=True)
 
-                # Process results
                 agent_results = []
                 for i, res in enumerate(results):
                     if isinstance(res, Exception):
@@ -1359,14 +1348,11 @@ async def run_agent():
                         display.show_agent_result(i + 1, summary_text, success=True)
                         agent_results.append((i + 1, response_text))
 
-                # Build sync summary for next iteration
                 _last_sync_summary = build_sync_summary(agent_results)
 
-                # Save all histories
                 for i in range(n_agents):
                     agents[i].save_history(config.get_conversation_file(i))
 
-                # Telegram notification for parallel iteration
                 tg_lines = [f"┌─ 🔄 <b>Iteration #{iteration}</b> (x{n_agents}) ──"]
                 for aid, text in agent_results:
                     preview = _extract_work_description(text) if text else "(no output)"
@@ -1382,9 +1368,6 @@ async def run_agent():
                 telegram.send("\n".join(tg_lines))
 
             else:
-                # ═══════════════════════════════════════
-                # SINGLE ITERATION (x1 — original code)
-                # ═══════════════════════════════════════
                 display.show_iteration_header(iteration)
                 config.log_output(f"--- Iteration #{iteration} ---")
 
@@ -1512,7 +1495,6 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
                     work_description=work_desc,
                 )
 
-            # === Common post-iteration logic ===
             if shutdown_mode:
                 display.show_info("Wrap-up complete. Shutting down.")
                 break

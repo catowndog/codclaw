@@ -595,7 +595,7 @@ class LLMAgent:
         self.stats = token_stats
         self.messages: list[dict] = []
         self._var_store: dict[str, any] = {}
-        self.agent_id: int = 0  # 0 = primary/single, 1+ = parallel agents
+        self.agent_id: int = 0  
 
     def _send_message_for_starlark(self, text: str):
         """Callback for send_message() inside Starlark — shows real-time message to user."""
