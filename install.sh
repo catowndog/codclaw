@@ -405,6 +405,26 @@ if [[ "${DO_ENV:-true}" == "true" ]]; then
     mkdir -p "$PROJECT_PATH/.temp" 2>/dev/null || true
 
     echo ""
+    echo -e "  ${DIM}Parallel agents (how many LLM agents work simultaneously):${NC}"
+    echo -e "    ${WHITE}1${NC}) x1 — single agent ${DIM}(default)${NC}"
+    echo -e "    ${WHITE}2${NC}) x2 — 2 agents in parallel"
+    echo -e "    ${WHITE}3${NC}) x3 — 3 agents in parallel"
+    echo -e "    ${WHITE}4${NC}) x4 — 4 agents in parallel"
+    ask "Choose [1]: "
+    read -r INPUT_PARALLEL
+    case "$INPUT_PARALLEL" in
+        2) PARALLEL_AGENTS=2 ;;
+        3) PARALLEL_AGENTS=3 ;;
+        4) PARALLEL_AGENTS=4 ;;
+        *) PARALLEL_AGENTS=1 ;;
+    esac
+    if [[ "$PARALLEL_AGENTS" -gt 1 ]]; then
+        ok "Parallel mode: x${PARALLEL_AGENTS} (${PARALLEL_AGENTS} agents)"
+    else
+        ok "Single agent mode (x1)"
+    fi
+
+    echo ""
     echo -e "  ${DIM}Telegram (optional — press Enter to skip):${NC}"
     ask "TG Bot Token: "
     read -r TG_BOT_TOKEN
@@ -462,6 +482,7 @@ MAX_TOKENS=256000
 SHOW_THINKING=true
 EFFORT=high
 DELAY=2
+PARALLEL_AGENTS=${PARALLEL_AGENTS}
 
 VIRTUAL_DISPLAY=true
 

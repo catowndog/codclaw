@@ -30,6 +30,7 @@ A fully autonomous AI agent that executes tasks from a plan file, using shell co
 | **Graceful Stop**           | Press `L` — agent receives wrap-up prompt, commits WIP, updates plan, then exits                    |
 | **Token Stats**             | Cost tracking with periodic reports every 5 minutes                                                 |
 | **Upload Images**           | Place mockups in `.temp/uploads/` — agent sees them at startup                                      |
+| **Parallel Agents (x1–x4)** | Run 2, 3, or 4 LLM agents simultaneously on different tasks — no file conflicts                    |
 | **Multi-provider**          | Anthropic + OpenAI-compatible APIs with automatic format conversion                                 |
 
 ## 🚀 Quick Start
@@ -90,6 +91,7 @@ PROJECT_PATH=/path/to/project
 MAX_TOKENS=256000
 EFFORT=high
 DELAY=2
+PARALLEL_AGENTS=1
 
 TG_BOT_TOKEN=123456:ABC...
 TG_USER_ID=123456789
@@ -115,6 +117,7 @@ IMAGE_MODEL=claude-image
 | `THINKING_ENABLED`   |          | `true`                      | Enable/disable extended thinking              |
 | `SHOW_THINKING`      |          | `true`                      | Display thinking blocks in CLI                |
 | `DELAY`              |          | `2`                         | Seconds between iterations                    |
+| `PARALLEL_AGENTS`    |          | `1`                         | Parallel agents: `1` `2` `3` `4` (x1–x4)     |
 | `DEBUG_REQUESTS`     |          | `false`                     | Log raw SSE events                            |
 | `IMAGE_MODEL`        |          | `claude-image`              | Model for image generation                    |
 | `TG_BOT_TOKEN`       |          | disabled                    | Telegram bot token                            |
@@ -132,6 +135,30 @@ IMAGE_MODEL=claude-image
 | `medium` | 16K tokens             | Balanced speed/quality       |
 | `high`   | 50% of max_tokens      | Complex tasks (default)      |
 | `max`    | max_tokens - 8K        | Maximum reasoning depth      |
+
+### Parallel Agents (x1–x4)
+
+Run multiple LLM agents simultaneously, each working on a different task from `tasks.md`:
+
+```env
+PARALLEL_AGENTS=4  # x4 mode — 4 agents work in parallel
+```
+
+| Mode | Agents | Description                                         |
+| ---- | ------ | --------------------------------------------------- |
+| x1   | 1      | Default — single agent, sequential execution        |
+| x2   | 2      | Two agents working on different tasks simultaneously |
+| x3   | 3      | Three parallel agents                               |
+| x4   | 4      | Maximum parallelism — four agents at once           |
+
+**How it works:**
+- First iteration always runs in x1 mode (agent sets up tasks)
+- From iteration 2+, the bot parses `tasks.md` and assigns one `[ ]` task per agent
+- Each agent gets explicit instructions: "YOUR task is X, do NOT touch Y and Z"
+- After each parallel iteration, a sync summary is injected into all agents so they know what others did
+- Each agent has its own conversation history (`conversation.json`, `conversation_2.json`, etc.)
+- If there are fewer pending tasks than agents, it automatically falls back to fewer agents
+- Fix requests (`/fix`, Enter) always run in x1 mode on the primary agent
 
 ## 🔧 Built-in Tools (12)
 
@@ -327,21 +354,28 @@ PROJECT_PATH/.temp/       # Agent working directory
 ## 🔄 How It Works
 
 ```
-1. Load .env → connect MCP servers
+1. Load .env → connect MCP servers → create N agent instances (based on PARALLEL_AGENTS)
 2. Crawl REFERENCE_SITES (if configured)
 3. Index .temp/codes/ knowledge base
 4. Load images from .temp/uploads/
 5. Read .temp/plan.md
 6. Loop (infinite):
-   ├── Send plan + tools to Claude (SSE streaming)
-   ├── Claude writes starlark code blocks with tool calls
-   ├── Execute starlark → run tools → collect results
-   ├── Return results to Claude → Claude continues
+   ├── Iteration 1 (always x1): setup, create tasks.md
+   ├── Iteration 2+ (x1 mode):
+   │   ├── Send plan + tools to Claude (SSE streaming)
+   │   ├── Claude writes starlark code blocks with tool calls
+   │   ├── Execute starlark → run tools → collect results
+   │   └── Return results to Claude → Claude continues
+   ├── Iteration 2+ (x2/x3/x4 parallel mode):
+   │   ├── Parse tasks.md → assign one [ ] task per agent
+   │   ├── Launch N agents concurrently (asyncio.gather)
+   │   ├── Each agent works on its own task independently
+   │   ├── Collect results → build sync summary for next iteration
+   │   └── Save each agent's conversation history separately
    ├── Auto-save screenshots/snapshots to .temp/references/
-   ├── Display response → save conversation
-   ├── Send Telegram notification
+   ├── Display response → save conversation(s)
+   ├── Send Telegram notification (per-agent results in parallel mode)
    ├── Auto-compress context if approaching token limit
-   ├── If all tasks done → agent researches new ideas → adds tasks → continues
    └── Wait DELAY seconds → next iteration
 7. On press L → wrap-up prompt → agent commits, updates plan → exit
 ```

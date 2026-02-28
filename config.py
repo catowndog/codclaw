@@ -58,11 +58,25 @@ SKILLS_DIR: str = str((_script_dir / _skills_raw).resolve()) if not os.path.isab
 
 IMAGE_MODEL: str = os.getenv("IMAGE_MODEL", "gpt-5-image")
 VIRTUAL_DISPLAY: bool = os.getenv("VIRTUAL_DISPLAY", "true").lower() in ("true", "1", "yes")
+PARALLEL_AGENTS: int = max(1, min(4, int(os.getenv("PARALLEL_AGENTS", "1"))))
 
 TEMP_DIR: str = os.path.join(PROJECT_PATH, ".temp")
 PLAN_FILE: str = os.path.join(TEMP_DIR, "plan.md")
 CONVERSATION_FILE: str = os.path.join(TEMP_DIR, "conversation.json")
 CODES_DIR: str = os.path.join(TEMP_DIR, "codes")
+
+
+def get_conversation_file(agent_id: int = 0) -> str:
+    """Get conversation file path for a specific agent.
+
+    agent_id=0 → conversation.json (primary / x1 mode)
+    agent_id=1 → conversation_2.json
+    agent_id=2 → conversation_3.json
+    etc.
+    """
+    if agent_id <= 0:
+        return CONVERSATION_FILE
+    return os.path.join(TEMP_DIR, f"conversation_{agent_id + 1}.json")
 
 _output_log: list[str] = []
 _OUTPUT_LOG_MAX = 50
@@ -98,4 +112,6 @@ def validate() -> list[str]:
         errors.append(f"EFFORT must be one of: low, medium, high, max (got: {EFFORT})")
     if API_PROVIDER not in ("anthropic", "openai"):
         errors.append(f"API_PROVIDER must be 'anthropic' or 'openai' (got: {API_PROVIDER})")
+    if PARALLEL_AGENTS not in (1, 2, 3, 4):
+        errors.append(f"PARALLEL_AGENTS must be 1, 2, 3, or 4 (got: {PARALLEL_AGENTS})")
     return errors

@@ -51,7 +51,7 @@ _pause_requested = False
 _original_term_settings = None
 _fix_queue: queue.Queue = queue.Queue()
 _current_fix_preview: str | None = None
-_stats = None  # TokenStats instance, set in run_agent()
+_stats = None  
 _input_queue: queue.Queue = queue.Queue()
 _stdin_thread: threading.Thread | None = None
 _pause_event = threading.Event()
@@ -851,6 +851,125 @@ End with a DETAILED summary of what you did (files changed, what was built, test
 - NEVER say the project is finished — always find more to improve"""
 
 
+def parse_pending_tasks() -> list[str]:
+    """Parse .temp/tasks.md and return list of uncompleted task descriptions.
+
+    Extracts all lines matching `- [ ] ...` pattern.
+    Returns list of task description strings (without the `- [ ] ` prefix).
+    """
+    tasks_content = read_tasks_file()
+    if not tasks_content:
+        return []
+    tasks = []
+    for line in tasks_content.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("- [ ] "):
+            task_text = stripped[6:].strip()
+            if task_text:
+                tasks.append(task_text)
+    return tasks
+
+
+def build_parallel_message(
+    task: str,
+    agent_id: int,
+    total_agents: int,
+    all_tasks: list[str],
+    plan_content: str,
+    sync_summary: str = "",
+) -> str:
+    """Build a focused user message for one agent in parallel mode.
+
+    Each agent receives:
+    - The full plan for context
+    - Its specific assigned task
+    - List of other agents' tasks (to avoid conflicts)
+    - Sync summary from previous iteration
+    - Anti-conflict rules
+    """
+    other_tasks_str = "\n".join(f"  - Agent {i+1}: {t}" for i, t in enumerate(all_tasks) if i != agent_id - 1)
+
+    sync_section = ""
+    if sync_summary:
+        sync_section = f"""
+
+## Previous Iteration Results (what other agents did):
+{sync_summary}
+DO NOT re-do any work described above. It is already completed.
+"""
+
+    uploads_section = ""
+    upload_files = _get_upload_filenames()
+    if upload_files:
+        files_list = ", ".join(upload_files)
+        uploads_section = f"""
+
+## Reference Images (.temp/uploads/)
+You have {len(upload_files)} reference image(s) available: {files_list}
+Keep them in mind when implementing UI, design, layout."""
+
+    return f"""You are **Agent {agent_id}** of {total_agents} parallel agents working simultaneously on this project.
+
+## YOUR ASSIGNED TASK (work ONLY on this):
+**{task}**
+
+## CONFLICT PREVENTION — CRITICAL:
+Other agents are working on different tasks AT THE SAME TIME as you:
+{other_tasks_str}
+
+Rules to prevent conflicts:
+1. Work ONLY on YOUR assigned task above — do NOT touch anything related to other agents' tasks
+2. Do NOT modify .temp/tasks.md — the primary agent (Agent 1) will update it
+3. Do NOT modify .temp/plan.md
+4. If your task requires creating new files, use unique filenames that won't clash
+5. If you need to modify a shared file (e.g., a router or config), be VERY careful — only add YOUR section, don't reorganize or refactor the whole file
+6. Focus on completing YOUR task fully — write code, verify it works, report what you did
+
+## User's Plan (.temp/plan.md):
+{plan_content}
+{sync_section}{uploads_section}
+After completing your task:
+- End with a DETAILED summary: which files you created/modified, what was built, any issues
+- DO NOT update tasks.md — Agent 1 handles that
+- Use send_message() to report your results"""
+
+
+def build_sync_summary(agent_results: list[tuple[int, str]]) -> str:
+    """Build a sync summary from parallel agent results.
+
+    Takes list of (agent_id, response_text) tuples.
+    Returns a compact summary for injection into next iteration.
+    """
+    if not agent_results:
+        return ""
+
+    lines = []
+    for agent_id, text in agent_results:
+        if not text:
+            lines.append(f"- Agent {agent_id}: (no output)")
+            continue
+        if text.startswith("Error:"):
+            lines.append(f"- Agent {agent_id}: FAILED — {text[:200]}")
+            continue
+        # Extract first meaningful line as summary
+        preview = ""
+        for line in text.strip().split("\n"):
+            line = line.strip()
+            if not line or len(line) < 10:
+                continue
+            if line.startswith("```") or line.startswith("---"):
+                continue
+            clean = line.lstrip("#").lstrip("*").lstrip("-").strip()
+            if clean and len(clean) >= 10:
+                preview = clean[:200]
+                break
+        if not preview:
+            preview = text[:200]
+        lines.append(f"- Agent {agent_id}: {preview}")
+
+    return "\n".join(lines)
+
+
 def _handle_ping():
     """Send last 20 lines of agent output to Telegram."""
     lines = config.get_output_log(20)
@@ -1077,6 +1196,7 @@ async def run_agent():
         effort=config.EFFORT,
         mcp_tools_count=mcp.get_tool_count(),
         skills_count=len(skills_list),
+        parallel_agents=config.PARALLEL_AGENTS,
     )
     display.show_info(f"Built-in tools: {builtin_count} (shell, files, db, http)")
     if config.DATABASE_URL:
@@ -1107,7 +1227,16 @@ async def run_agent():
         _tg_thread = threading.Thread(target=_telegram_poller_thread, daemon=True, name="tg-poller")
         _tg_thread.start()
 
-    agent = LLMAgent(mcp_manager=mcp, skills_manager=skills, builtin_tools=builtin, token_stats=stats)
+    # Create agent(s) — x1 uses single agent, x2/x3/x4 use multiple
+    agents = []
+    for i in range(config.PARALLEL_AGENTS):
+        a = LLMAgent(mcp_manager=mcp, skills_manager=skills, builtin_tools=builtin, token_stats=stats)
+        a.agent_id = i
+        agents.append(a)
+    agent = agents[0]  # primary agent (backward compat)
+
+    if config.PARALLEL_AGENTS > 1:
+        display.show_info(f"Parallel mode: [bold cyan]x{config.PARALLEL_AGENTS}[/bold cyan] ({config.PARALLEL_AGENTS} agents)")
 
     _setup_terminal()
     _start_stdin_thread()
@@ -1116,9 +1245,15 @@ async def run_agent():
         await research_sites(agent, config.REFERENCE_SITES, config.TEMP_DIR,
                              check_interrupt=_check_keypress, check_pause=_wait_if_paused)
 
-    if os.path.exists(config.CONVERSATION_FILE):
-        if agent.load_history(config.CONVERSATION_FILE):
-            display.show_info("Loaded previous conversation state")
+    # Load conversation histories
+    for i, a in enumerate(agents):
+        conv_file = config.get_conversation_file(i)
+        if os.path.exists(conv_file):
+            if a.load_history(conv_file):
+                if i == 0:
+                    display.show_info("Loaded previous conversation state")
+                else:
+                    display.show_info(f"Loaded conversation state for Agent {i + 1}")
 
     skills_summary = skills.get_skills_summary()
     mcp_tool_names = [t["name"] for t in mcp.get_all_tools()]
@@ -1138,6 +1273,7 @@ async def run_agent():
 
     iteration = 1
     shutdown_mode = False
+    _last_sync_summary = ""  # sync summary for parallel mode
 
     _original_sigint = signal.getsignal(signal.SIGINT)
     def _sigint_handler(signum, frame):
@@ -1154,135 +1290,229 @@ async def run_agent():
                 await asyncio.sleep(0.5)
                 _check_keypress()
 
-            display.show_iteration_header(iteration)
-            config.log_output(f"--- Iteration #{iteration} ---")
-
+            # --- Parallel mode (x2/x3/x4) ---
             pending = _take_pending_message()
-            remaining = _get_queue_size()
-            if pending:
-                if remaining > 0:
-                    display.show_info(f"📬 Processing fix [1 of {remaining + 1} in queue]")
-                else:
-                    display.show_info("📬 Processing fix request")
+            use_parallel = (
+                config.PARALLEL_AGENTS > 1
+                and not shutdown_mode
+                and not pending
+                and iteration > 1  # first iteration always single (setup)
+            )
 
-            # Track current fix for /status
-            global _current_fix_preview
-            if pending:
-                if isinstance(pending, list):
-                    _current_fix_preview = " ".join(b.get("text", "") for b in pending if isinstance(b, dict) and b.get("type") == "text")[:150]
-                else:
-                    _current_fix_preview = pending[:150]
-            else:
-                _current_fix_preview = None
+            if use_parallel:
+                pending_tasks = parse_pending_tasks()
+                n_agents = min(config.PARALLEL_AGENTS, len(pending_tasks))
+                if n_agents < 2:
+                    use_parallel = False  # not enough tasks, fall back to x1
 
-            if shutdown_mode:
-                user_msg = GRACEFUL_STOP_PROMPT
-            elif pending:
-                fix_preamble = """URGENT MESSAGE FROM THE OPERATOR (highest priority):
+            if use_parallel:
+                # ═══════════════════════════════════════
+                # PARALLEL ITERATION (x2/x3/x4)
+                # ═══════════════════════════════════════
+                display.show_parallel_iteration_header(iteration, n_agents)
+                config.log_output(f"--- Iteration #{iteration} (x{n_agents} parallel) ---")
 
-"""
-                fix_postamble = """
-
-Handle this request IMMEDIATELY before continuing with your regular tasks.
-IMPORTANT: Use `send_message()` to report back the results to the operator via Telegram. The operator is waiting for a response — send command output, logs, screenshots, confirmation, etc.
-After completing it, update .temp/tasks.md and continue with your normal workflow."""
-
-                if isinstance(pending, list):
-                    text_preview = " ".join(b.get("text", "") for b in pending if b.get("type") == "text")[:100]
-                    img_count = sum(1 for b in pending if b.get("type") == "image")
-                    display.show_info(f"Injecting user message + {img_count} image(s): [bold]{text_preview}[/bold]")
-                    user_msg = [{"type": "text", "text": fix_preamble}] + pending + [{"type": "text", "text": fix_postamble}]
-                    pending = text_preview
-                else:
-                    display.show_info(f"Injecting user message: [bold]{pending[:100]}[/bold]")
-                    user_msg = fix_preamble + pending + fix_postamble
-            elif iteration == 1 and not agent.messages:
-                user_msg = build_initial_message(plan_content, file_listing, upload_images)
-            elif iteration == 1 and agent.messages:
                 plan_content = read_plan_file()
-                user_msg = build_resume_message(plan_content)
-                display.show_info("♻️ Resuming from previous session")
-                telegram.send(
-                    f"┌───────────────────────\n"
-                    f"│  ♻️  <b>SESSION RESUMED</b>\n"
-                    f"└───────────────────────\n\n"
-                    f"  Continuing previous session...\n"
-                    f"  History restored ✓"
-                )
-            else:
-                plan_content = read_plan_file()
-                user_msg = build_continuation_message(plan_content)
 
-            try:
+                # Refresh system prompt
                 skills_summary = skills.get_skills_summary()
                 mcp_tool_names = [t["name"] for t in mcp.get_all_tools()]
                 tool_sigs = agent.get_starlark_tool_signatures()
                 codes_summary = get_codes_summary()
                 system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary, tool_signatures=tool_sigs, codes_summary=codes_summary)
 
-                response_text = await agent.run_turn(user_msg, system_prompt, check_interrupt=_check_keypress, check_pause=_wait_if_paused)
-            except Exception as e:
-                error_str = str(e)
-                display.show_error(f"Agent error: {e}")
-                telegram.notify_error(config.AGENT_NAME, error_str)
+                # Build per-agent messages and launch concurrently
+                assigned_tasks = pending_tasks[:n_agents]
+                display.show_info(f"Assigning {n_agents} tasks to {n_agents} agents:")
+                for i, task in enumerate(assigned_tasks):
+                    display.show_info(f"  Agent {i+1}: {task[:80]}")
+
+                coroutines = []
+                for i in range(n_agents):
+                    msg_i = build_parallel_message(
+                        task=assigned_tasks[i],
+                        agent_id=i + 1,
+                        total_agents=n_agents,
+                        all_tasks=assigned_tasks,
+                        plan_content=plan_content,
+                        sync_summary=_last_sync_summary,
+                    )
+                    coroutines.append(
+                        agents[i].run_turn(msg_i, system_prompt, check_interrupt=_check_keypress, check_pause=_wait_if_paused)
+                    )
+
+                # Run all agents concurrently
+                display.show_info(f"Running {n_agents} agents in parallel...")
+                results = await asyncio.gather(*coroutines, return_exceptions=True)
+
+                # Process results
+                agent_results = []
+                for i, res in enumerate(results):
+                    if isinstance(res, Exception):
+                        display.show_agent_result(i + 1, str(res), success=False)
+                        agent_results.append((i + 1, f"Error: {res}"))
+                    else:
+                        response_text = res or ""
+                        if response_text:
+                            config.log_output(f"[Agent {i+1}] {response_text[:300]}")
+                        summary_text = _extract_work_description(response_text) or f"done ({len(response_text)} chars)"
+                        display.show_agent_result(i + 1, summary_text, success=True)
+                        agent_results.append((i + 1, response_text))
+
+                # Build sync summary for next iteration
+                _last_sync_summary = build_sync_summary(agent_results)
+
+                # Save all histories
+                for i in range(n_agents):
+                    agents[i].save_history(config.get_conversation_file(i))
+
+                # Telegram notification for parallel iteration
+                tg_lines = [f"┌─ 🔄 <b>Iteration #{iteration}</b> (x{n_agents}) ──"]
+                for aid, text in agent_results:
+                    preview = _extract_work_description(text) if text else "(no output)"
+                    status = "❌" if text.startswith("Error:") else "✅"
+                    tg_lines.append(f"│ Agent {aid}: {status} {telegram.esc(preview[:100])}")
+                if stats:
+                    def _fmt(n):
+                        if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
+                        elif n >= 1_000: return f"{n/1_000:.0f}K"
+                        return str(n)
+                    tg_lines.append(f"│ 📈 {_fmt(stats.total_input_tokens)} in / {_fmt(stats.total_output_tokens)} out")
+                tg_lines.append(f"└──────────────────────")
+                telegram.send("\n".join(tg_lines))
+
+            else:
+                # ═══════════════════════════════════════
+                # SINGLE ITERATION (x1 — original code)
+                # ═══════════════════════════════════════
+                display.show_iteration_header(iteration)
+                config.log_output(f"--- Iteration #{iteration} ---")
+
+                remaining = _get_queue_size()
+                if pending:
+                    if remaining > 0:
+                        display.show_info(f"📬 Processing fix [1 of {remaining + 1} in queue]")
+                    else:
+                        display.show_info("📬 Processing fix request")
+
+                global _current_fix_preview
+                if pending:
+                    if isinstance(pending, list):
+                        _current_fix_preview = " ".join(b.get("text", "") for b in pending if isinstance(b, dict) and b.get("type") == "text")[:150]
+                    else:
+                        _current_fix_preview = pending[:150]
+                else:
+                    _current_fix_preview = None
+
                 if shutdown_mode:
-                    display.show_warning("Wrap-up failed — shutting down anyway.")
-                    break
-                if "context length" in error_str.lower() or "too many tokens" in error_str.lower():
-                    display.show_warning("Context overflow detected — forcing compression...")
-                    try:
-                        await agent._compress_history(system_prompt)
-                        display.show_info("Compressed. Retrying...")
-                    except Exception as ce:
-                        display.show_error(f"Compression failed: {ce}")
-                display.show_info(f"Retrying in {config.DELAY} seconds...")
-                await asyncio.sleep(config.DELAY)
-                iteration += 1
-                continue
+                    user_msg = GRACEFUL_STOP_PROMPT
+                elif pending:
+                    fix_preamble = """URGENT MESSAGE FROM THE OPERATOR (highest priority):
 
-            agent.save_history(config.CONVERSATION_FILE)
+"""
+                    fix_postamble = """
 
-            if response_text:
-                config.log_output(response_text)
+Handle this request IMMEDIATELY before continuing with your regular tasks.
+IMPORTANT: Use `send_message()` to report back the results to the operator via Telegram. The operator is waiting for a response — send command output, logs, screenshots, confirmation, etc.
+After completing it, update .temp/tasks.md and continue with your normal workflow."""
 
-            if pending and response_text:
-                fix_response = response_text[:2500] if len(response_text) > 2500 else response_text
-                pending_preview = pending[:150] if isinstance(pending, str) else " ".join(b.get("text", "") for b in pending if isinstance(b, dict) and b.get("type") == "text")[:150]
-                remaining_now = _get_queue_size()
-                queue_line = f"\n│\n│  📋 Queue: {remaining_now} more pending" if remaining_now > 0 else ""
-                telegram.send(
-                    f"┌─ ✅ <b>FIX COMPLETED</b> ──────\n"
-                    f"│\n"
-                    f"│  <b>Request:</b>\n"
-                    f"│  <i>{telegram.esc(pending_preview)}</i>\n"
-                    f"│\n"
-                    f"│  <b>Result:</b>\n"
-                    f"│  {telegram.esc(fix_response[:800])}"
-                    f"{queue_line}\n"
-                    f"│\n"
-                    f"└───────────────────────"
+                    if isinstance(pending, list):
+                        text_preview = " ".join(b.get("text", "") for b in pending if b.get("type") == "text")[:100]
+                        img_count = sum(1 for b in pending if b.get("type") == "image")
+                        display.show_info(f"Injecting user message + {img_count} image(s): [bold]{text_preview}[/bold]")
+                        user_msg = [{"type": "text", "text": fix_preamble}] + pending + [{"type": "text", "text": fix_postamble}]
+                        pending = text_preview
+                    else:
+                        display.show_info(f"Injecting user message: [bold]{pending[:100]}[/bold]")
+                        user_msg = fix_preamble + pending + fix_postamble
+                elif iteration == 1 and not agent.messages:
+                    user_msg = build_initial_message(plan_content, file_listing, upload_images)
+                elif iteration == 1 and agent.messages:
+                    plan_content = read_plan_file()
+                    user_msg = build_resume_message(plan_content)
+                    display.show_info("♻️ Resuming from previous session")
+                    telegram.send(
+                        f"┌───────────────────────\n"
+                        f"│  ♻️  <b>SESSION RESUMED</b>\n"
+                        f"└───────────────────────\n\n"
+                        f"  Continuing previous session...\n"
+                        f"  History restored ✓"
+                    )
+                else:
+                    plan_content = read_plan_file()
+                    user_msg = build_continuation_message(plan_content)
+
+                try:
+                    skills_summary = skills.get_skills_summary()
+                    mcp_tool_names = [t["name"] for t in mcp.get_all_tools()]
+                    tool_sigs = agent.get_starlark_tool_signatures()
+                    codes_summary = get_codes_summary()
+                    system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary, tool_signatures=tool_sigs, codes_summary=codes_summary)
+
+                    response_text = await agent.run_turn(user_msg, system_prompt, check_interrupt=_check_keypress, check_pause=_wait_if_paused)
+                except Exception as e:
+                    error_str = str(e)
+                    display.show_error(f"Agent error: {e}")
+                    telegram.notify_error(config.AGENT_NAME, error_str)
+                    if shutdown_mode:
+                        display.show_warning("Wrap-up failed — shutting down anyway.")
+                        break
+                    if "context length" in error_str.lower() or "too many tokens" in error_str.lower():
+                        display.show_warning("Context overflow detected — forcing compression...")
+                        try:
+                            await agent._compress_history(system_prompt)
+                            display.show_info("Compressed. Retrying...")
+                        except Exception as ce:
+                            display.show_error(f"Compression failed: {ce}")
+                    display.show_info(f"Retrying in {config.DELAY} seconds...")
+                    await asyncio.sleep(config.DELAY)
+                    iteration += 1
+                    continue
+
+                agent.save_history(config.CONVERSATION_FILE)
+
+                if response_text:
+                    config.log_output(response_text)
+
+                if pending and response_text:
+                    fix_response = response_text[:2500] if len(response_text) > 2500 else response_text
+                    pending_preview = pending[:150] if isinstance(pending, str) else " ".join(b.get("text", "") for b in pending if isinstance(b, dict) and b.get("type") == "text")[:150]
+                    remaining_now = _get_queue_size()
+                    queue_line = f"\n│\n│  📋 Queue: {remaining_now} more pending" if remaining_now > 0 else ""
+                    telegram.send(
+                        f"┌─ ✅ <b>FIX COMPLETED</b> ──────\n"
+                        f"│\n"
+                        f"│  <b>Request:</b>\n"
+                        f"│  <i>{telegram.esc(pending_preview)}</i>\n"
+                        f"│\n"
+                        f"│  <b>Result:</b>\n"
+                        f"│  {telegram.esc(fix_response[:800])}"
+                        f"{queue_line}\n"
+                        f"│\n"
+                        f"└───────────────────────"
+                    )
+
+                summary = response_text[:800] if response_text else "(no response)"
+                work_desc = _extract_work_description(response_text)
+
+                tasks_content = read_tasks_file()
+                tasks_preview = ""
+                if tasks_content:
+                    lines = tasks_content.split("\n")
+                    current_tasks = [l.strip() for l in lines if l.strip().startswith("- [ ]")]
+                    if current_tasks:
+                        tasks_preview = "\n".join(current_tasks[:5])
+                        if len(current_tasks) > 5:
+                            tasks_preview += f"\n... +{len(current_tasks) - 5} more"
+
+                telegram.notify_iteration(
+                    iteration, config.AGENT_NAME, summary,
+                    tokens_in=stats.total_input_tokens, tokens_out=stats.total_output_tokens,
+                    tasks_preview=tasks_preview,
+                    work_description=work_desc,
                 )
 
-            summary = response_text[:800] if response_text else "(no response)"
-            work_desc = _extract_work_description(response_text)
-
-            tasks_content = read_tasks_file()
-            tasks_preview = ""
-            if tasks_content:
-                lines = tasks_content.split("\n")
-                current_tasks = [l.strip() for l in lines if l.strip().startswith("- [ ]")]
-                if current_tasks:
-                    tasks_preview = "\n".join(current_tasks[:5])
-                    if len(current_tasks) > 5:
-                        tasks_preview += f"\n... +{len(current_tasks) - 5} more"
-
-            telegram.notify_iteration(
-                iteration, config.AGENT_NAME, summary,
-                tokens_in=stats.total_input_tokens, tokens_out=stats.total_output_tokens,
-                tasks_preview=tasks_preview,
-                work_description=work_desc,
-            )
-
+            # === Common post-iteration logic ===
             if shutdown_mode:
                 display.show_info("Wrap-up complete. Shutting down.")
                 break
@@ -1317,7 +1547,8 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
         display.show_stats(stats.format_summary())
         telegram.notify_stop(config.AGENT_NAME, iteration - 1, image_count=stats.image_generations)
         display.show_info("Saving conversation state...")
-        agent.save_history(config.CONVERSATION_FILE)
+        for i, a in enumerate(agents):
+            a.save_history(config.get_conversation_file(i))
         display.show_info("Disconnecting MCP servers...")
         await mcp.disconnect_all()
         display.show_info("Done.")
