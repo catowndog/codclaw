@@ -379,10 +379,6 @@ MongoDB uses JSON queries: `{"collection":"users","action":"find","filter":{}}`
 
 If CodClaw saved you time or you just think it's cool — consider buying me a coffee. It helps keep the project alive and motivates me to add new features.
 
-<a href="https://buymeacoffee.com/catowndog">
-  <img src="https://img.buymeacoffee.com/button-api/?text=Buy me a coffee&emoji=☕&slug=catowndog&button_colour=FFDD00&font_colour=000000&font_family=Poppins&outline_colour=000000&coffee_colour=ffffff" alt="Buy me a coffee" />
-</a>
-
 **Support via crypto:**
 
 | Currency      | Address                                            |
