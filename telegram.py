@@ -15,6 +15,11 @@ _last_send_time = 0.0
 _MIN_INTERVAL = 0.5
 
 
+def esc(text: str) -> str:
+    """Escape HTML special chars for Telegram HTML parse mode."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 
 def send(text: str, parse_mode: str = "HTML") -> bool:
     global _last_send_time
@@ -28,11 +33,20 @@ def send(text: str, parse_mode: str = "HTML") -> bool:
 
     url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/sendMessage"
     if len(text) > 4000:
-        text = text[:4000] + "\n\n... (truncated)"
+        text = text[:4000]
+        open_count = text.lower().count("<pre>")
+        close_count = text.lower().count("</pre>")
+        if open_count > close_count:
+            text += "</pre>"
+        text += "\n\n... (truncated)"
     try:
         resp = httpx.post(url, json={"chat_id": config.TG_USER_ID, "text": text, "parse_mode": parse_mode, "disable_web_page_preview": True}, timeout=10)
         _last_send_time = time.time()
-        return resp.status_code == 200
+        if resp.status_code == 200:
+            return True
+        resp2 = httpx.post(url, json={"chat_id": config.TG_USER_ID, "text": text, "disable_web_page_preview": True}, timeout=10)
+        _last_send_time = time.time()
+        return resp2.status_code == 200
     except Exception:
         _last_send_time = time.time()
         return False
@@ -88,23 +102,23 @@ def notify_stop(agent_name: str, iterations: int, total_cost: float = 0):
 
 
 def notify_iteration(iteration: int, agent_name: str, summary: str, tokens_in: int = 0, tokens_out: int = 0, tasks_preview: str = "", work_description: str = ""):
-    work_section = f"\n\n🔨 <b>Working on:</b>\n{work_description}" if work_description else ""
-    tasks_section = f"\n\n📋 <b>Tasks:</b>\n{tasks_preview}" if tasks_preview else ""
+    work_section = f"\n\n🔨 <b>Working on:</b>\n{esc(work_description)}" if work_description else ""
+    tasks_section = f"\n\n📋 <b>Tasks:</b>\n{esc(tasks_preview)}" if tasks_preview else ""
     send(
         f"🤖 <b>{agent_name}</b> — iteration #{iteration}"
         f"{work_section}\n\n"
-        f"<b>Done this iteration:</b>\n{summary}\n"
+        f"<b>Done this iteration:</b>\n{esc(summary)}\n"
         f"{tasks_section}\n"
         f"📊 {tokens_in:,} in / {tokens_out:,} out"
     )
 
 
 def notify_error(agent_name: str, error: str):
-    send(f"❌ <b>{agent_name}</b>\n\n<code>{error[:2000]}</code>")
+    send(f"❌ <b>{agent_name}</b>\n\n<code>{esc(error[:2000])}</code>")
 
 
 def notify_tool_call(tool_name: str, args_preview: str = ""):
-    preview = f"\n<code>{args_preview[:300]}</code>" if args_preview else ""
+    preview = f"\n<code>{esc(args_preview[:300])}</code>" if args_preview else ""
     send(f"🔧 <b>{tool_name}</b>{preview}")
 
 
@@ -219,7 +233,7 @@ def _parse_updates(updates: list[dict]) -> dict:
             fix_text = text[4:].strip()
             if fix_text:
                 result["fixes"].append(fix_text)
-                send(f"✅ Fix request received!\n\n<i>{fix_text[:300]}</i>")
+                send(f"✅ Fix request received!\n\n<i>{esc(fix_text[:300])}</i>")
             else:
                 send("⚠️ Usage: <code>/fix describe what to fix</code>")
 

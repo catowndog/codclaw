@@ -106,6 +106,84 @@ def _sanitize_code(code: str) -> str:
     return code
 
 
+def _try_fix_syntax(code: str, error: SyntaxError) -> str | None:
+    """Try to auto-fix common LLM syntax mistakes.
+
+    Handles:
+    - Unterminated string literals (multiline strings in single quotes → triple quotes)
+    - Unclosed parentheses / brackets at end of code
+    """
+    msg = str(error.msg) if error.msg else ""
+
+    if "unterminated string literal" in msg:
+        lines = code.split("\n")
+        fixed_lines = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            try:
+                ast.parse(line.strip(), mode="eval")
+                fixed_lines.append(line)
+                i += 1
+                continue
+            except SyntaxError:
+                pass
+
+            in_str = None
+            for ci, ch in enumerate(line):
+                if ch in ('"', "'") and (ci == 0 or line[ci - 1] != '\\'):
+                    if in_str == ch:
+                        in_str = None
+                    elif in_str is None:
+                        in_str = ch
+
+            if in_str is not None:
+                combined = line
+                j = i + 1
+                found_close = False
+                while j < len(lines):
+                    combined += "\n" + lines[j]
+                    if in_str in lines[j]:
+                        found_close = True
+                        triple = in_str * 3
+                        pos = None
+                        temp_in = None
+                        for ci, ch in enumerate(line):
+                            if ch in ('"', "'") and (ci == 0 or line[ci - 1] != '\\'):
+                                if temp_in == ch:
+                                    temp_in = None
+                                elif temp_in is None:
+                                    temp_in = ch
+                                    pos = ci
+                        if pos is not None:
+                            new_line = line[:pos] + triple + line[pos + 1:]
+                            close_line = lines[j]
+                            close_pos = close_line.find(in_str)
+                            if close_pos >= 0:
+                                new_close = close_line[:close_pos] + triple + close_line[close_pos + 1:]
+                                fixed_lines.append(new_line)
+                                for k in range(i + 1, j):
+                                    fixed_lines.append(lines[k])
+                                fixed_lines.append(new_close)
+                                i = j + 1
+                                break
+                        else:
+                            fixed_lines.append(line)
+                            i += 1
+                            break
+                    j += 1
+                if not found_close:
+                    fixed_lines.append(line + in_str)
+                    i += 1
+            else:
+                fixed_lines.append(line)
+                i += 1
+
+        return "\n".join(fixed_lines)
+
+    return None
+
+
 class StarlarkExecutor:
     """
     Restricted AST-based executor for Starlark-like code.
@@ -217,16 +295,33 @@ class StarlarkExecutor:
         try:
             tree = ast.parse(code, mode="exec")
         except SyntaxError as e:
-            return {
-                "success": False,
-                "output": "",
-                "call_log": [],
-                "variables": {},
-                "error": f"SyntaxError: {e}",
-                "messages": [],
-                "output_entries": [],
-                "var_updates": {},
-            }
+            fixed = _try_fix_syntax(code, e)
+            if fixed and fixed != code:
+                try:
+                    tree = ast.parse(fixed, mode="exec")
+                    code = fixed
+                except SyntaxError:
+                    return {
+                        "success": False,
+                        "output": "",
+                        "call_log": [],
+                        "variables": {},
+                        "error": f"SyntaxError: {e}",
+                        "messages": [],
+                        "output_entries": [],
+                        "var_updates": {},
+                    }
+            else:
+                return {
+                    "success": False,
+                    "output": "",
+                    "call_log": [],
+                    "variables": {},
+                    "error": f"SyntaxError: {e}",
+                    "messages": [],
+                    "output_entries": [],
+                    "var_updates": {},
+                }
 
         try:
             await self._exec_body(tree.body)
@@ -472,7 +567,15 @@ class StarlarkExecutor:
                 return value[lower:upper:step]
             else:
                 idx = await self._eval_expr(node.slice)
-                return value[idx]
+                try:
+                    return value[idx]
+                except TypeError:
+                    val_type = type(value).__name__
+                    val_preview = str(value)[:200]
+                    raise _StarlarkError(
+                        f"Cannot index {val_type} with {type(idx).__name__} key '{idx}'. "
+                        f"Value preview: {val_preview}"
+                    )
 
         elif isinstance(node, ast.Attribute):
             value = await self._eval_expr(node.value)

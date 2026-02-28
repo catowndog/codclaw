@@ -586,7 +586,7 @@ class LLMAgent:
         config.log_output(f"📨 {text[:200]}")
         try:
             import telegram as _tg
-            _tg.send(f"📨 <b>Agent message:</b>\n\n{text[:600]}")
+            _tg.send(f"📨 <b>Agent message:</b>\n\n{_tg.esc(text[:600])}")
         except Exception:
             pass
 
@@ -830,7 +830,7 @@ class LLMAgent:
                             if attempt < max_retries:
                                 display.show_info("Retrying MCP call to get fresh screenshot...")
                                 await asyncio.sleep(1)
-                                continue  
+                                continue
                     if "get_snapshot" in tool_name:
                         try:
                             self._auto_save_snapshot(tool_args, result)
@@ -849,7 +849,21 @@ class LLMAgent:
                         await asyncio.sleep(2)
                         if getattr(self, '_check_pause', None):
                             await self._check_pause()
-            return f"Error after {max_retries} retries: {last_error}"
+
+            server_name = self.mcp.get_server_for_tool(tool_name)
+            if server_name:
+                reconnected = await self.mcp.reconnect_server(server_name)
+                if reconnected:
+                    try:
+                        result = await self.mcp.call_tool(tool_name, tool_args)
+                        if isinstance(result, str) and result.startswith("Error"):
+                            raise RuntimeError(result)
+                        return result
+                    except Exception as e:
+                        last_error = e
+                        display.show_warning(f"MCP {tool_name} still failing after reconnect: {e}")
+
+            return f"Error after {max_retries} retries (+ reconnect attempt): {last_error}"
 
         return f"Unknown tool: {tool_name}"
 
@@ -1057,13 +1071,14 @@ class LLMAgent:
                 if not schema.get("required"):
                     _no_required.add(t["name"])
             valid_tool_calls = []
+            dropped_tool_names = []
             for tc in result["tool_calls"]:
                 if not tc["input"] and tc["name"] not in _no_required:
-                    display.show_warning(f"Tool '{tc['name']}' has empty input — skipped (likely truncated by max_tokens)")
+                    dropped_tool_names.append(tc["name"])
                     continue
                 valid_tool_calls.append(tc)
-            if len(valid_tool_calls) < len(result["tool_calls"]):
-                display.show_warning(f"Dropped {len(result['tool_calls']) - len(valid_tool_calls)} broken tool call(s)")
+            if dropped_tool_names:
+                display.show_warning(f"Dropped {len(dropped_tool_names)} broken tool call(s) with empty input (truncated by max_tokens): {', '.join(dropped_tool_names)}")
             result["tool_calls"] = valid_tool_calls
 
             all_text_parts.extend(result["text_parts"])
@@ -1071,9 +1086,15 @@ class LLMAgent:
             _resp_text = "\n".join(result["text_parts"]).strip()
             if _resp_text:
                 import telegram as _tg
-                _tg.send(f"💬 <b>Response:</b>\n\n{_resp_text[:600]}")
+                _tg.send(f"💬 <b>Response:</b>\n\n{_tg.esc(_resp_text[:600])}")
 
             stop_reason = response.get("stop_reason")
+
+            if dropped_tool_names and not valid_tool_calls and stop_reason == "tool_use":
+                display.show_warning("All tool calls had empty input — requesting retry...")
+                self.messages.append({"role": "assistant", "content": response["content"]})
+                self.messages.append({"role": "user", "content": f"Your tool call(s) were truncated and had empty input: {', '.join(dropped_tool_names)}. Please retry — call the tool(s) again with the correct arguments."})
+                continue
 
             if (result["has_thinking"] and not result["text_parts"]
                     and not result["tool_calls"] and stop_reason == "end_turn"):
