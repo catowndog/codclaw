@@ -110,6 +110,7 @@ async def research_sites(agent, reference_sites: list[str], temp_dir: str, check
     Research each reference site before starting the main work loop.
     Creates .md reports in .temp/references/ for each site.
     Skips sites that already have a report (cache).
+    If ALL sites are already cached — skips the entire research phase instantly.
 
     Args:
         agent: LLMAgent instance (with MCP connected)
@@ -125,6 +126,17 @@ async def research_sites(agent, reference_sites: list[str], temp_dir: str, check
     screenshots_dir = refs_dir / "screenshots"
     refs_dir.mkdir(parents=True, exist_ok=True)
     screenshots_dir.mkdir(parents=True, exist_ok=True)
+
+    all_cached = True
+    for url in reference_sites:
+        parsed = urlparse(url)
+        domain = parsed.netloc.replace(":", "_").replace(".", "-")
+        if domain and not (refs_dir / f"{domain}.md").exists():
+            all_cached = False
+            break
+    if all_cached:
+        display.show_info(f"Reference sites: all {len(reference_sites)} report(s) cached, skipping research phase")
+        return
 
     display.show_info(f"Research phase: {len(reference_sites)} reference site(s) to analyze")
 
