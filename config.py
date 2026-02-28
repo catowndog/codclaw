@@ -8,13 +8,21 @@ load_dotenv(_script_dir / ".env", override=True)
 
 AGENT_NAME: str = os.getenv("AGENT_NAME", "CLI Agent")
 
-API_PROVIDER: str = os.getenv("API_PROVIDER", "anthropic").lower()
+LLM_API_PROVIDER: str = os.getenv("LLM_API_PROVIDER", os.getenv("API_PROVIDER", "anthropic")).lower()
+API_PROVIDER: str = LLM_API_PROVIDER
+
+IMAGE_API_PROVIDER: str = os.getenv("IMAGE_API_PROVIDER", "").lower()
 
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_BASE_URL: str = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
 
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+
+GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+GEMINI_IMAGE_MODEL: str = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
+
+OPENAI_IMAGE_MODEL: str = os.getenv("OPENAI_IMAGE_MODEL", "")
 
 PROJECT_PATH: str = os.getenv("PROJECT_PATH", str(_script_dir))
 MODEL: str = os.getenv("MODEL", "claude-opus-4-6")
@@ -24,9 +32,9 @@ OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "")
 
 def get_model() -> str:
     """Get the model name for the active API provider."""
-    if API_PROVIDER == "openai" and OPENAI_MODEL:
+    if LLM_API_PROVIDER == "openai" and OPENAI_MODEL:
         return OPENAI_MODEL
-    if API_PROVIDER == "anthropic" and ANTHROPIC_MODEL:
+    if LLM_API_PROVIDER == "anthropic" and ANTHROPIC_MODEL:
         return ANTHROPIC_MODEL
     return MODEL
 MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "128000"))
@@ -57,6 +65,17 @@ _skills_raw = os.getenv("SKILLS_DIR", str(_script_dir / "skills"))
 SKILLS_DIR: str = str((_script_dir / _skills_raw).resolve()) if not os.path.isabs(_skills_raw) else _skills_raw
 
 IMAGE_MODEL: str = os.getenv("IMAGE_MODEL", "gpt-5-image")
+
+
+def get_image_model() -> str:
+    """Get the image model name for the active IMAGE_API_PROVIDER."""
+    if IMAGE_API_PROVIDER == "openai" and OPENAI_IMAGE_MODEL:
+        return OPENAI_IMAGE_MODEL
+    if IMAGE_API_PROVIDER == "gemini" and GEMINI_IMAGE_MODEL:
+        return GEMINI_IMAGE_MODEL
+    return IMAGE_MODEL
+
+
 VIRTUAL_DISPLAY: bool = os.getenv("VIRTUAL_DISPLAY", "true").lower() in ("true", "1", "yes")
 PARALLEL_AGENTS: int = max(1, min(4, int(os.getenv("PARALLEL_AGENTS", "1"))))
 
@@ -98,11 +117,11 @@ def get_output_log(n: int = 20) -> list[str]:
 
 def validate() -> list[str]:
     errors = []
-    if API_PROVIDER == "openai":
+    if LLM_API_PROVIDER == "openai":
         if not OPENAI_API_KEY:
-            errors.append("OPENAI_API_KEY is not set in .env (required when API_PROVIDER=openai)")
+            errors.append("OPENAI_API_KEY is not set in .env (required when LLM_API_PROVIDER=openai)")
         if not OPENAI_BASE_URL:
-            errors.append("OPENAI_BASE_URL is not set in .env (required when API_PROVIDER=openai)")
+            errors.append("OPENAI_BASE_URL is not set in .env (required when LLM_API_PROVIDER=openai)")
     else:
         if not ANTHROPIC_API_KEY:
             errors.append("ANTHROPIC_API_KEY is not set in .env")
@@ -110,8 +129,14 @@ def validate() -> list[str]:
         errors.append(f"PROJECT_PATH does not exist: {PROJECT_PATH}")
     if EFFORT not in ("low", "medium", "high", "max"):
         errors.append(f"EFFORT must be one of: low, medium, high, max (got: {EFFORT})")
-    if API_PROVIDER not in ("anthropic", "openai"):
-        errors.append(f"API_PROVIDER must be 'anthropic' or 'openai' (got: {API_PROVIDER})")
+    if LLM_API_PROVIDER not in ("anthropic", "openai"):
+        errors.append(f"LLM_API_PROVIDER must be 'anthropic' or 'openai' (got: {LLM_API_PROVIDER})")
+    if IMAGE_API_PROVIDER and IMAGE_API_PROVIDER not in ("openai", "gemini"):
+        errors.append(f"IMAGE_API_PROVIDER must be 'openai', 'gemini', or empty (got: {IMAGE_API_PROVIDER})")
+    if IMAGE_API_PROVIDER == "gemini" and not GEMINI_API_KEY:
+        errors.append("GEMINI_API_KEY is not set in .env (required when IMAGE_API_PROVIDER=gemini)")
+    if IMAGE_API_PROVIDER == "openai" and not OPENAI_API_KEY:
+        errors.append("OPENAI_API_KEY is not set in .env (required when IMAGE_API_PROVIDER=openai)")
     if PARALLEL_AGENTS not in (1, 2, 3, 4):
         errors.append(f"PARALLEL_AGENTS must be 1, 2, 3, or 4 (got: {PARALLEL_AGENTS})")
     return errors
