@@ -1240,17 +1240,48 @@ async def run_agent():
     _start_stdin_thread()
 
     if config.REFERENCE_SITES:
-        await research_sites(agent, config.REFERENCE_SITES, config.TEMP_DIR,
-                             check_interrupt=_check_keypress, check_pause=_wait_if_paused)
+        # Skip reference site crawling if the project already has files (not just .temp/)
+        _existing = [f for f in os.listdir(config.PROJECT_PATH) if f != ".temp" and not f.startswith(".")]
+        if _existing:
+            display.show_info(f"Project already has files ({len(_existing)} items) — skipping reference sites crawl")
+        else:
+            await research_sites(agent, config.REFERENCE_SITES, config.TEMP_DIR,
+                                 check_interrupt=_check_keypress, check_pause=_wait_if_paused)
 
     for i, a in enumerate(agents):
         conv_file = config.get_conversation_file(i)
+        conv_full_file = os.path.join(config.TEMP_DIR, "conversation_full.json") if i == 0 else ""
+        loaded = False
+        compressed_count = 0
+
+        # Try conversation.json first
         if os.path.exists(conv_file):
-            if a.load_history(conv_file):
-                if i == 0:
-                    display.show_info("Loaded previous conversation state")
-                else:
-                    display.show_info(f"Loaded conversation state for Agent {i + 1}")
+            loaded = a.load_history(conv_file)
+            if loaded:
+                compressed_count = len(a.messages)
+
+        # If conversation.json is missing/empty but conversation_full.json exists — use it
+        if not loaded and conv_full_file and os.path.exists(conv_full_file):
+            if a.load_history(conv_full_file):
+                loaded = True
+                display.show_info(f"Restored from conversation_full.json ({len(a.messages)} messages)")
+        elif loaded and conv_full_file and os.path.exists(conv_full_file):
+            # If conversation.json loaded but is compressed (few messages),
+            # and conversation_full.json has more context — prefer full
+            try:
+                with open(conv_full_file, "r", encoding="utf-8") as _f:
+                    full_msgs = json.load(_f)
+                if len(full_msgs) > compressed_count + 5:
+                    display.show_info(f"Restored full history ({len(full_msgs)} msgs instead of {compressed_count} compressed)")
+                    a.messages = full_msgs
+            except Exception:
+                pass
+
+        if loaded:
+            if i == 0:
+                display.show_info(f"Loaded conversation state ({len(a.messages)} messages)")
+            else:
+                display.show_info(f"Loaded conversation state for Agent {i + 1} ({len(a.messages)} messages)")
 
     skills_summary = skills.get_skills_summary()
     mcp_tool_names = [t["name"] for t in mcp.get_all_tools()]
