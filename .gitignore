@@ -4,4 +4,4 @@ __pycache__
 skills/security-review.md
 skills/frontend-design.md
 skills/tailwind-master-styles.md
-.DS_Store
+**/.DS_Store
