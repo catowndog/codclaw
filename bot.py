@@ -968,8 +968,7 @@ def _handle_status():
         lines.append(f"\n───────────────────")
         lines.append(f"  📈 Tokens: {fmt(_stats.total_input_tokens)} in / {fmt(_stats.total_output_tokens)} out")
         if _stats.image_generations > 0:
-            lines.append(f"  🎨 Images: {_stats.image_generations}  (${_stats.image_cost:.4f})")
-        lines.append(f"  💰 Total:  ${_stats.total_cost:.4f}")
+            lines.append(f"  🎨 Images: {_stats.image_generations}")
         lines.append(f"  ⏱  Uptime: {_stats.elapsed_minutes:.1f} min")
         lines.append(f"───────────────────")
 
@@ -1282,7 +1281,6 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
                 tokens_in=stats.total_input_tokens, tokens_out=stats.total_output_tokens,
                 tasks_preview=tasks_preview,
                 work_description=work_desc,
-                total_cost=stats.total_cost,
             )
 
             if shutdown_mode:
@@ -1317,7 +1315,7 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
         signal.signal(signal.SIGINT, _original_sigint)
         _restore_terminal()
         display.show_stats(stats.format_summary())
-        telegram.notify_stop(config.AGENT_NAME, iteration - 1, stats.total_cost, image_count=stats.image_generations, image_cost=stats.image_cost)
+        telegram.notify_stop(config.AGENT_NAME, iteration - 1, image_count=stats.image_generations)
         display.show_info("Saving conversation state...")
         agent.save_history(config.CONVERSATION_FILE)
         display.show_info("Disconnecting MCP servers...")
@@ -1462,7 +1460,6 @@ Then an empty line, then the full skill content starting with the one-line descr
     usage = response.get("usage", {})
     inp_tokens = usage.get("input_tokens", 0)
     out_tokens = usage.get("output_tokens", 0)
-    cost = (inp_tokens / 1_000_000) * 15.0 + (out_tokens / 1_000_000) * 75.0  
 
     skills = SkillsManager(config.SKILLS_DIR)
     result = skills.create_skill(skill_name, content)
@@ -1470,10 +1467,9 @@ Then an empty line, then the full skill content starting with the one-line descr
 
     if usage:
         display.show_token_usage(inp_tokens, out_tokens)
-        display.show_info(f"Cost: ${cost:.4f}")
 
     skill_file = str(Path(config.SKILLS_DIR) / f"{skill_name}.md")
-    telegram.notify_skill_done(skill_name, len(content), content[:200] + f"\n\n💰 Cost: ${cost:.4f}", skill_file)
+    telegram.notify_skill_done(skill_name, len(content), content[:200], skill_file)
 
     display.show_skill_created(skill_name, len(content))
 
@@ -1677,11 +1673,9 @@ Apply the changes and return the COMPLETE updated skill file content."""
     usage = response.get("usage", {})
     inp_tokens = usage.get("input_tokens", 0)
     out_tokens = usage.get("output_tokens", 0)
-    cost = (inp_tokens / 1_000_000) * 15.0 + (out_tokens / 1_000_000) * 75.0
 
     if usage:
         display.show_token_usage(inp_tokens, out_tokens)
-        display.show_info(f"Cost: ${cost:.4f}")
 
     old_size = len(current_content)
     new_size = len(new_content)
@@ -1690,7 +1684,7 @@ Apply the changes and return the COMPLETE updated skill file content."""
     display.show_info(f"Skill '{skill_name}' updated: {old_size:,} → {new_size:,} chars ({diff_str})")
 
     skill_file = str(Path(config.SKILLS_DIR) / f"{skill_name}.md")
-    telegram.notify_skill_done(skill_name, new_size, f"Updated: {prompt[:200]}\n\n💰 ${cost:.4f}", skill_file)
+    telegram.notify_skill_done(skill_name, new_size, f"Updated: {prompt[:200]}", skill_file)
 
 
 
@@ -1794,7 +1788,7 @@ Create the skills now."""
                 f"📚 <b>Training complete</b>\n\n"
                 f"Topic: {topic}\n"
                 f"Iterations: {iteration}\n"
-                f"💰 ${stats.total_cost:.4f}"
+                f"📊 {stats.total_tokens:,} tokens"
             )
             break
 

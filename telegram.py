@@ -104,20 +104,18 @@ def notify_start(agent_name: str, project_path: str, model: str, mcp_servers: li
     )
 
 
-def notify_stop(agent_name: str, iterations: int, total_cost: float = 0, image_count: int = 0, image_cost: float = 0):
-    cost_line = f"  💰  ${total_cost:.4f}" if total_cost > 0 else ""
-    img_line = f"\n  🎨  {image_count} images (${image_cost:.4f})" if image_count > 0 else ""
+def notify_stop(agent_name: str, iterations: int, image_count: int = 0):
+    img_line = f"\n  🎨  {image_count} images" if image_count > 0 else ""
     send(
         f"┌───────────────────────\n"
         f"│  🛑  <b>AGENT STOPPED</b>\n"
         f"└───────────────────────\n\n"
-        f"  ⏱   {iterations} iterations\n"
-        f"{cost_line}{img_line}\n\n"
+        f"  ⏱   {iterations} iterations{img_line}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━"
     )
 
 
-def notify_iteration(iteration: int, agent_name: str, summary: str, tokens_in: int = 0, tokens_out: int = 0, tasks_preview: str = "", work_description: str = "", total_cost: float = 0):
+def notify_iteration(iteration: int, agent_name: str, summary: str, tokens_in: int = 0, tokens_out: int = 0, tasks_preview: str = "", work_description: str = ""):
     work_section = f"\n🔨 <b>Working on:</b>\n<i>{esc(work_description[:300])}</i>" if work_description else ""
     tasks_lines = ""
     if tasks_preview:
@@ -128,7 +126,6 @@ def notify_iteration(iteration: int, agent_name: str, summary: str, tokens_in: i
         if tasks_lines:
             tasks_lines = f"\n\n📋 <b>Tasks:</b>{tasks_lines}"
 
-    # Format tokens compactly
     def fmt_tokens(n):
         if n >= 1_000_000:
             return f"{n/1_000_000:.1f}M"
@@ -136,15 +133,13 @@ def notify_iteration(iteration: int, agent_name: str, summary: str, tokens_in: i
             return f"{n/1_000:.0f}K"
         return str(n)
 
-    cost_part = f" │ ${total_cost:.4f}" if total_cost > 0 else ""
-
     send(
         f"━━━  <b>Iteration #{iteration}</b>  ━━━"
         f"{work_section}\n\n"
         f"📝 <b>Done:</b>\n{esc(summary[:800])}\n"
         f"{tasks_lines}\n\n"
         f"───────────────────\n"
-        f"📊  {fmt_tokens(tokens_in)} in │ {fmt_tokens(tokens_out)} out{cost_part}"
+        f"📊  {fmt_tokens(tokens_in)} in │ {fmt_tokens(tokens_out)} out"
     )
 
 

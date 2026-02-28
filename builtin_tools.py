@@ -933,16 +933,8 @@ class BuiltinTools:
 
                 data = resp.json()
 
-                # Track image generation cost
-                usage = data.get("usage", {})
-                inp_tokens = usage.get("prompt_tokens", usage.get("input_tokens", 0))
-                out_tokens = usage.get("completion_tokens", usage.get("output_tokens", 0))
-                if inp_tokens or out_tokens:
-                    img_cost = (inp_tokens / 1_000_000) * 5.0 + (out_tokens / 1_000_000) * 15.0
-                else:
-                    img_cost = 0.04  # flat rate fallback per image
                 if self.stats:
-                    self.stats.add_image(img_cost)
+                    self.stats.add_image()
 
                 choices = data.get("choices", [])
                 if not choices:
