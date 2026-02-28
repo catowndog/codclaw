@@ -23,7 +23,7 @@ def show_banner(agent_name: str = "CLI Agent"):
     console.print()
 
 
-def show_config(model: str, project_path: str, effort: str, mcp_tools_count: int, skills_count: int):
+def show_config(model: str, project_path: str, effort: str, mcp_tools_count: int, skills_count: int, parallel_agents: int = 1):
     """Display configuration summary."""
     table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
     table.add_column("Key", style="dim")
@@ -31,6 +31,8 @@ def show_config(model: str, project_path: str, effort: str, mcp_tools_count: int
     table.add_row("Model", model)
     table.add_row("Project", project_path)
     table.add_row("Effort", effort)
+    if parallel_agents > 1:
+        table.add_row("Parallel", f"x{parallel_agents} ({parallel_agents} agents)")
     table.add_row("MCP Tools", str(mcp_tools_count))
     table.add_row("Skills", str(skills_count))
     console.print(Panel(table, title="[bold]Configuration", box=box.ROUNDED, style="cyan"))
@@ -64,6 +66,23 @@ def show_iteration_header(iteration: int):
     console.print()
     console.print(Rule(f"[bold yellow]Iteration #{iteration}[/bold yellow]", style="yellow"))
     console.print()
+
+
+def show_parallel_iteration_header(iteration: int, agent_count: int):
+    """Show iteration header for parallel mode."""
+    console.print()
+    console.print(Rule(
+        f"[bold cyan]Iteration #{iteration}[/bold cyan] [bold magenta](x{agent_count})[/bold magenta]",
+        style="cyan"
+    ))
+    console.print()
+
+
+def show_agent_result(agent_id: int, summary: str, success: bool = True):
+    """Show result for a single agent in parallel mode."""
+    icon = "[green]✅[/green]" if success else "[red]❌[/red]"
+    preview = summary[:120] if summary else "(no output)"
+    console.print(f"  {icon} [bold]Agent {agent_id}[/bold]: {preview}")
 
 
 def show_thinking(text: str):

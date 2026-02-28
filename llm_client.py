@@ -595,14 +595,16 @@ class LLMAgent:
         self.stats = token_stats
         self.messages: list[dict] = []
         self._var_store: dict[str, any] = {}
+        self.agent_id: int = 0  # 0 = primary/single, 1+ = parallel agents
 
     def _send_message_for_starlark(self, text: str):
         """Callback for send_message() inside Starlark — shows real-time message to user."""
-        display.show_text_response(text)
-        config.log_output(f"📨 {text[:200]}")
+        prefix = f"[Agent {self.agent_id + 1}] " if self.agent_id > 0 else ""
+        display.show_text_response(f"{prefix}{text}")
+        config.log_output(f"📨 {prefix}{text[:200]}")
         try:
             import telegram as _tg
-            _tg.send(f"📨 <b>Agent message:</b>\n\n{_tg.esc(text[:600])}")
+            _tg.send(f"📨 <b>{prefix}Agent message:</b>\n\n{_tg.esc(text[:600])}")
         except Exception:
             pass
 
@@ -809,8 +811,9 @@ class LLMAgent:
             await self._check_pause()
 
         import telegram
+        _agent_prefix = f"[A{self.agent_id + 1}] " if self.agent_id > 0 else ""
         args_preview = json.dumps(tool_args, ensure_ascii=False)[:150] if tool_args else ""
-        config.log_output(f"🔧 {tool_name}: {args_preview}")
+        config.log_output(f"🔧 {_agent_prefix}{tool_name}: {args_preview}")
 
         args_str = json.dumps(tool_args, ensure_ascii=False)[:200] if tool_args else ""
         if not any(skip in tool_name for skip in self._TG_SKIP_TOOLS):
