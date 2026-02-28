@@ -28,21 +28,29 @@ def md_to_tg(text: str) -> str:
     - **bold** → <b>bold</b>
     - `inline` → <i>inline</i>
     - Lines starting with # → <b>heading</b>
+    Bold/italic NOT applied inside <pre> blocks.
     """
     import re
 
     text = esc(text)
 
-    def _replace_code_block(m):
+    # --- Step 1: Extract code blocks into placeholders ---
+    _code_blocks = []
+
+    def _save_code_block(m):
         code = m.group(1).strip()
         lines = code.split("\n")
         if lines and re.match(r'^[a-zA-Z_]+$', lines[0].strip()):
             code = "\n".join(lines[1:]).strip()
         if not code:
             return ""
-        return f"<pre>{code}</pre>"
+        idx = len(_code_blocks)
+        _code_blocks.append(code)
+        return f"\x00CODE{idx}\x00"
 
-    text = re.sub(r'```[a-zA-Z_]*\n(.*?)```', _replace_code_block, text, flags=re.DOTALL)
+    # Closed code blocks
+    text = re.sub(r'```[a-zA-Z_]*\n(.*?)```', _save_code_block, text, flags=re.DOTALL)
+    # Unclosed code block at end
     m = re.search(r'```[a-zA-Z_]*\n(.+)$', text, flags=re.DOTALL)
     if m:
         code = m.group(1).strip()
@@ -50,12 +58,18 @@ def md_to_tg(text: str) -> str:
         if lines and re.match(r'^[a-zA-Z_]+$', lines[0].strip()):
             code = "\n".join(lines[1:]).strip()
         if code:
-            text = text[:m.start()] + f"<pre>{code}</pre>"
+            idx = len(_code_blocks)
+            _code_blocks.append(code)
+            text = text[:m.start()] + f"\x00CODE{idx}\x00"
 
+    # --- Step 2: Apply formatting (only to non-code text) ---
+    # Bold: **text**
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
 
+    # Inline code: `text`
     text = re.sub(r'`([^`]+?)`', r'<i>\1</i>', text)
 
+    # Headings: lines starting with # → bold
     lines = text.split("\n")
     result = []
     for line in lines:
@@ -67,6 +81,10 @@ def md_to_tg(text: str) -> str:
             continue
         result.append(line)
     text = "\n".join(result)
+
+    # --- Step 3: Restore code blocks ---
+    for i, code in enumerate(_code_blocks):
+        text = text.replace(f"\x00CODE{i}\x00", f"<pre>{code}</pre>")
 
     text = re.sub(r'\n{3,}', '\n\n', text)
 
