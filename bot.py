@@ -685,7 +685,7 @@ Your working directory is .temp/ inside PROJECT_PATH. Use it for:
 9. **DETAILED REPORTS** — End every iteration with a SPECIFIC summary: which files changed, what was built/fixed, test results. Not vague "made progress" — list concrete actions.
 10. **TASKS FROM PLAN ONLY** — When tasks run out, re-read .temp/plan.md and create tasks for the next uncompleted phase. Do NOT invent random improvements, do NOT browse competitors for ideas, do NOT search web for "best practices". If the entire plan is done — report via send_message() and wait.
 11. **GENERATE IMAGES, NOT PLACEHOLDERS** — NEVER use placeholder image URLs (picsum, unsplash, placehold.co, via.placeholder, dummyimage). ALWAYS use `generate_image()` to create real, unique images for the project. After building any page or component with images, take a screenshot — if any image is broken or placeholder, fix it immediately by generating a real one.
-12. **RESPOND TO OPERATOR** — When you receive an operator message (via /fix or Enter), ALWAYS use `send_message()` to report the result back via Telegram. The operator expects a response. Example: operator says "restart the server and send me the log" → you restart, capture output, call `send_message(output)` to deliver it.
+12. **OPERATOR MESSAGES OVERRIDE EVERYTHING** — When you receive a message starting with "⚠️⚠️⚠️ CRITICAL: DIRECT ORDER", you MUST drop your current task and execute it IMMEDIATELY. This is the highest priority — higher than the plan, higher than tasks.md, higher than anything. Do NOT ignore it. Do NOT continue your previous work first. Execute the operator's request, use `send_message()` to report results via Telegram, then resume normal work.
 13. **STICK TO THE PLAN** — ONLY do what is specified in .temp/plan.md. Do NOT add technologies, tools, or infrastructure not mentioned in the plan (Docker, Dockerfile, docker-compose, CI/CD, Kubernetes, nginx configs, Makefile, etc.). If the plan doesn't mention Docker — don't create Dockerfile. If the plan doesn't mention tests — don't write tests. Focus on what's asked, not what you think is "best practice"."""
 
 
@@ -1384,14 +1384,23 @@ async def run_agent():
                 if shutdown_mode:
                     user_msg = GRACEFUL_STOP_PROMPT
                 elif pending:
-                    fix_preamble = """URGENT MESSAGE FROM THE OPERATOR (highest priority):
+                    fix_preamble = """⚠️⚠️⚠️ CRITICAL: DIRECT ORDER FROM THE OPERATOR — OVERRIDE ALL OTHER TASKS ⚠️⚠️⚠️
+
+You MUST execute this request RIGHT NOW. Drop whatever you were doing.
+Do NOT continue your current task. Do NOT ignore this. Do NOT say "I'll do it later".
+This is NOT a suggestion — it is a COMMAND with the HIGHEST PRIORITY.
+
+THE OPERATOR'S REQUEST:
 
 """
                     fix_postamble = """
 
-Handle this request IMMEDIATELY before continuing with your regular tasks.
-IMPORTANT: Use `send_message()` to report back the results to the operator via Telegram. The operator is waiting for a response — send command output, logs, screenshots, confirmation, etc.
-After completing it, update .temp/tasks.md and continue with your normal workflow."""
+MANDATORY ACTIONS:
+1. Execute the request above IMMEDIATELY — write the code, run the command, make the change NOW
+2. Do NOT skip it, do NOT postpone it, do NOT "note it for later"
+3. Use `send_message()` to report the result back to the operator via Telegram
+4. Only AFTER completing this request, resume your normal tasks
+5. If the request contradicts the plan — THE REQUEST WINS. The operator's word is law."""
 
                     if isinstance(pending, list):
                         text_preview = " ".join(b.get("text", "") for b in pending if b.get("type") == "text")[:100]
