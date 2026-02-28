@@ -15,7 +15,7 @@ INSTALL_DIR="/opt/codclaw"
 REPO_URL="https://github.com/catowndog/codclaw.git"
 SERVICE_NAME="codclaw"
 PYTHON_VER="3.13"
-NODE_MAJOR="22"
+NODE_MAJOR="24"
 VENV_DIR="$INSTALL_DIR/venv"
 TOTAL_STEPS=10
 
@@ -215,26 +215,48 @@ fi
 
 progress_bar 40
 
-step "Node.js $NODE_MAJOR"
+step "Node.js $NODE_MAJOR (via nvm)"
 
-if command -v node &>/dev/null; then
-    NODE_INSTALLED=$(node --version 2>&1)
-    NODE_MAJOR_INSTALLED="${NODE_INSTALLED#v}"
-    NODE_MAJOR_INSTALLED="${NODE_MAJOR_INSTALLED%%.*}"
-    if [[ "$NODE_MAJOR_INSTALLED" -ge "$NODE_MAJOR" ]]; then
-        skip "Node.js: $NODE_INSTALLED"
-    else
-        info "Upgrading Node.js from $NODE_INSTALLED..."
-        curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - > /dev/null 2>&1
-        apt-get install -y -qq nodejs > /dev/null 2>&1
-        ok "Node.js $(node --version) installed"
-    fi
+export NVM_DIR="/root/.nvm"
+
+if [[ -s "$NVM_DIR/nvm.sh" ]]; then
+    skip "nvm already installed"
 else
-    info "Installing Node.js ${NODE_MAJOR}..."
-    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - > /dev/null 2>&1
-    apt-get install -y -qq nodejs > /dev/null 2>&1
+    info "Installing nvm..."
+    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh 2>/dev/null | bash > /dev/null 2>&1
+    ok "nvm installed"
+fi
+
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+CURRENT_NODE=""
+if command -v node &>/dev/null; then
+    CURRENT_NODE=$(node --version 2>&1)
+    CURRENT_MAJOR="${CURRENT_NODE#v}"
+    CURRENT_MAJOR="${CURRENT_MAJOR%%.*}"
+fi
+
+if [[ -n "$CURRENT_NODE" && "${CURRENT_MAJOR:-0}" -ge "$NODE_MAJOR" ]]; then
+    skip "Node.js: $CURRENT_NODE"
+else
+    info "Installing Node.js ${NODE_MAJOR} via nvm..."
+    nvm install "$NODE_MAJOR" > /dev/null 2>&1
+    nvm use "$NODE_MAJOR" > /dev/null 2>&1
+    nvm alias default "$NODE_MAJOR" > /dev/null 2>&1
     ok "Node.js $(node --version) installed"
 fi
+
+info "Updating npm to latest..."
+npm install -g npm@latest > /dev/null 2>&1
+ok "npm $(npm --version)"
+
+NODE_PATH="$(which node)"
+NPM_PATH="$(which npm)"
+NPX_PATH="$(which npx 2>/dev/null || true)"
+ln -sf "$NODE_PATH" /usr/local/bin/node
+ln -sf "$NPM_PATH" /usr/local/bin/npm
+[[ -n "$NPX_PATH" ]] && ln -sf "$NPX_PATH" /usr/local/bin/npx
+ok "Symlinked node/npm/npx to /usr/local/bin"
 
 progress_bar 50
 
@@ -393,10 +415,37 @@ if [[ "${DO_ENV:-true}" == "true" ]]; then
     ask "Database URL (optional, press Enter to skip): "
     read -r DATABASE_URL
 
+    echo ""
+    echo -e "  ${BOLD}${WHITE}Reference sites${NC} ${DIM}(sites the agent will use as design/code references)${NC}"
+    echo -e "  ${DIM}Enter URLs one per line. Press Enter on empty line when done.${NC}"
+    REFERENCE_SITES_ARR=()
+    while true; do
+        ask "URL (or Enter to finish): "
+        read -r REF_URL
+        if [[ -z "$REF_URL" ]]; then
+            break
+        fi
+        if [[ "$REF_URL" != http://* && "$REF_URL" != https://* ]]; then
+            REF_URL="https://$REF_URL"
+        fi
+        REFERENCE_SITES_ARR+=("\"$REF_URL\"")
+        ok "Added: $REF_URL"
+    done
+    if [[ ${#REFERENCE_SITES_ARR[@]} -eq 0 ]]; then
+        REFERENCE_SITES_JSON="[]"
+        info "No reference sites — you can add them later in .env"
+    else
+        REFERENCE_SITES_JSON="[$(IFS=,; echo "${REFERENCE_SITES_ARR[*]}")]"
+        ok "${#REFERENCE_SITES_ARR[@]} reference site(s) configured"
+    fi
+
     cat > "$ENV_FILE" << ENVEOF
 AGENT_NAME=${AGENT_NAME}
 
 API_PROVIDER=${API_PROVIDER}
+
+MODEL=claude-opus-4-6
+IMAGE_MODEL=gpt-5-image
 
 ANTHROPIC_API_KEY=${API_PROVIDER:+$( [[ "$API_PROVIDER" == "anthropic" ]] && echo "$API_KEY" || echo "" )}
 ANTHROPIC_BASE_URL=${API_PROVIDER:+$( [[ "$API_PROVIDER" == "anthropic" ]] && echo "$API_BASE_URL" || echo "https://api.anthropic.com" )}
@@ -405,6 +454,8 @@ ANTHROPIC_MODEL=${API_PROVIDER:+$( [[ "$API_PROVIDER" == "anthropic" ]] && echo 
 OPENAI_API_KEY=${API_PROVIDER:+$( [[ "$API_PROVIDER" == "openai" ]] && echo "$API_KEY" || echo "" )}
 OPENAI_BASE_URL=${API_PROVIDER:+$( [[ "$API_PROVIDER" == "openai" ]] && echo "$API_BASE_URL" || echo "" )}
 OPENAI_MODEL=${API_PROVIDER:+$( [[ "$API_PROVIDER" == "openai" ]] && echo "$API_MODEL" || echo "" )}
+
+SYSTEM_PROMPT=You are an autonomous agent. Follow the plan in .temp/plan.md
 
 PROJECT_PATH=${PROJECT_PATH}
 MAX_TOKENS=256000
@@ -419,7 +470,7 @@ TG_USER_ID=${TG_USER_ID:-}
 
 DATABASE_URL=${DATABASE_URL:-}
 
-REFERENCE_SITES=[]
+REFERENCE_SITES=${REFERENCE_SITES_JSON}
 MCP_SERVERS_CONFIG=./mcp_servers.json
 SKILLS_DIR=./skills
 ENVEOF
