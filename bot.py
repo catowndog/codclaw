@@ -49,7 +49,8 @@ _stop_requested = False
 _stop_shown = False
 _pause_requested = False
 _original_term_settings = None
-_pending_user_message: str | list | None = None
+_fix_queue: queue.Queue = queue.Queue()
+_current_fix_preview: str | None = None
 _input_queue: queue.Queue = queue.Queue()
 _stdin_thread: threading.Thread | None = None
 _pause_event = threading.Event()
@@ -176,9 +177,9 @@ def _check_keypress() -> bool:
 def _collect_user_input():
     """
     Temporarily restore terminal, show a rich prompt, collect user input,
-    then re-enter cbreak mode. Stores the message in _pending_user_message.
+    then re-enter cbreak mode. Puts the message into _fix_queue.
     """
-    global _pending_user_message, _original_term_settings
+    global _original_term_settings
     if _original_term_settings is not None:
         try:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _original_term_settings)
@@ -201,8 +202,8 @@ def _collect_user_input():
         ))
         msg = input("  ▸ ")
         if msg.strip():
-            _pending_user_message = msg.strip()
-            c.print(f"  [green]✓[/green] Message queued: [italic]{msg.strip()[:80]}{'...' if len(msg.strip()) > 80 else ''}[/italic]")
+            _fix_queue.put(msg.strip())
+            c.print(f"  [green]✓[/green] Message queued [{_fix_queue.qsize()}]: [italic]{msg.strip()[:80]}{'...' if len(msg.strip()) > 80 else ''}[/italic]")
             c.print()
         else:
             c.print("  [dim]Cancelled — empty input.[/dim]")
@@ -216,12 +217,17 @@ def _collect_user_input():
         pass
 
 
-def _take_pending_message() -> str | None:
-    """Take and clear the pending user message. Returns None if no message."""
-    global _pending_user_message
-    msg = _pending_user_message
-    _pending_user_message = None
-    return msg
+def _take_pending_message() -> str | list | None:
+    """Take one fix from the FIFO queue. Returns None if queue is empty."""
+    try:
+        return _fix_queue.get_nowait()
+    except queue.Empty:
+        return None
+
+
+def _get_queue_size() -> int:
+    """Return number of pending fixes in queue."""
+    return _fix_queue.qsize()
 
 
 def _setup_terminal():
@@ -798,6 +804,51 @@ IMPORTANT:
 - NEVER say the project is finished — always find more to improve"""
 
 
+def build_resume_message(plan_content: str) -> str:
+    """Build message for first iteration after restart (session resume)."""
+    tasks_content = read_tasks_file()
+    tasks_section = ""
+    if tasks_content:
+        tasks_section = f"""
+
+## Your Task List (.temp/tasks.md):
+{tasks_content}
+"""
+    else:
+        tasks_section = """
+
+## Your Task List (.temp/tasks.md):
+File not found. You MUST create it now with your first tasks based on the plan.
+"""
+
+    uploads_section = ""
+    upload_files = _get_upload_filenames()
+    if upload_files:
+        files_list = ", ".join(upload_files)
+        uploads_section = f"""
+
+## Reference Images (.temp/uploads/)
+You have {len(upload_files)} reference image(s) available: {files_list}
+These were shown to you at the start. ALWAYS keep them in mind when implementing UI, design, layout, and visual features.
+If you need to review them, use `read_file` or `list_directory` on .temp/uploads/."""
+
+    return f"""⚠️ SESSION RESUMED after restart. You are continuing your previous work.
+
+Your conversation history has been restored. DO NOT start from scratch or repeat completed work.
+
+## User's Plan (.temp/plan.md):
+{plan_content}
+{tasks_section}{uploads_section}
+IMPORTANT — RESUME INSTRUCTIONS:
+1. Read .temp/tasks.md to see what was already completed and what is in progress
+2. Check git log to see your recent commits
+3. If a task was in-progress when the session ended, resume it from where you left off
+4. Do NOT re-do completed tasks — check the "Completed" section
+5. Continue working normally — pick the next uncompleted task
+
+End with a DETAILED summary of what you did (files changed, what was built, test results)
+- NEVER say the project is finished — always find more to improve"""
+
 
 def _handle_ping():
     """Send last 20 lines of agent output to Telegram."""
@@ -844,6 +895,35 @@ def _handle_tasks():
     telegram.send("\n\n".join(parts) if parts else "📋 No data yet")
 
 
+def _handle_queue():
+    """Send fix queue status to Telegram."""
+    size = _fix_queue.qsize()
+    if size == 0:
+        telegram.send("📭 Fix queue is empty — agent working on regular tasks.")
+    else:
+        telegram.send(f"📬 Fix queue: <b>{size}</b> fix(es) pending")
+
+
+def _handle_status():
+    """Send detailed agent status to Telegram."""
+    state = "⏸ PAUSED" if _pause_requested else ("🛑 STOPPING" if _stop_requested else "▶️ RUNNING")
+    queue_size = _fix_queue.qsize()
+    current = _current_fix_preview
+
+    parts = [f"ℹ️ <b>Agent status:</b> {state}"]
+
+    if current:
+        parts.append(f"🔧 <b>Current fix:</b> <i>{telegram.esc(current)}</i>")
+
+    if queue_size > 0:
+        parts.append(f"📬 <b>Queue:</b> {queue_size} fix(es) pending")
+    else:
+        parts.append("📭 <b>Queue:</b> empty")
+
+    parts.append(f"\n📱 /fix /stop /pause /resume /ping /tasks /queue /status")
+    telegram.send("\n".join(parts))
+
+
 async def _wait_if_paused():
     """Blocks execution until pause is lifted.
 
@@ -865,7 +945,7 @@ def _telegram_poller_thread():
     the event loop is blocked on a long HTTP stream (SSE, MCP call).
     This is critical for /pause and /stop to work immediately.
     """
-    global _stop_requested, _pause_requested, _pending_user_message
+    global _stop_requested, _pause_requested
     while True:
         try:
             commands = telegram.poll_commands_sync()
@@ -874,16 +954,20 @@ def _telegram_poller_thread():
                 _show_stop_panel()
             if commands["pause"] and not _pause_requested:
                 _pause_requested = True
-                _pause_event.clear()  
+                _pause_event.clear()
                 _show_pause_panel()
             if commands["resume"] and _pause_requested:
                 _pause_requested = False
-                _pause_event.set()  
+                _pause_event.set()
                 display.show_info("Agent resumed via Telegram!")
             if commands.get("ping"):
                 _handle_ping()
             if commands.get("tasks"):
                 _handle_tasks()
+            if commands.get("queue"):
+                _handle_queue()
+            if commands.get("status"):
+                _handle_status()
             for fix in commands["fixes"]:
                 if isinstance(fix, dict):
                     fix_text = fix["text"]
@@ -897,22 +981,11 @@ def _telegram_poller_thread():
                                 "data": img["data"],
                             },
                         })
-                    if _pending_user_message is None:
-                        _pending_user_message = [{"type": "text", "text": fix_text}] + image_blocks
-                    elif isinstance(_pending_user_message, list):
-                        _pending_user_message.append({"type": "text", "text": " | " + fix_text})
-                        _pending_user_message.extend(image_blocks)
-                    else:
-                        _pending_user_message = [{"type": "text", "text": _pending_user_message + " | " + fix_text}] + image_blocks
-                    display.show_info(f"TG /fix + 🖼 received: [bold]{fix_text[:100]}[/bold]")
+                    _fix_queue.put([{"type": "text", "text": fix_text}] + image_blocks)
+                    display.show_info(f"TG /fix + 🖼 queued [{_fix_queue.qsize()}]: [bold]{fix_text[:100]}[/bold]")
                 else:
-                    if _pending_user_message is None:
-                        _pending_user_message = fix
-                    elif isinstance(_pending_user_message, list):
-                        _pending_user_message.append({"type": "text", "text": " | " + fix})
-                    else:
-                        _pending_user_message += " | " + fix
-                    display.show_info(f"TG /fix received: [bold]{fix[:100]}[/bold]")
+                    _fix_queue.put(fix)
+                    display.show_info(f"TG /fix queued [{_fix_queue.qsize()}]: [bold]{fix[:100]}[/bold]")
         except Exception:
             pass
         time.sleep(2)
@@ -1030,6 +1103,22 @@ async def run_agent():
             config.log_output(f"--- Iteration #{iteration} ---")
 
             pending = _take_pending_message()
+            remaining = _get_queue_size()
+            if pending:
+                if remaining > 0:
+                    display.show_info(f"📬 Processing fix [1 of {remaining + 1} in queue]")
+                else:
+                    display.show_info("📬 Processing fix request")
+
+            # Track current fix for /status
+            global _current_fix_preview
+            if pending:
+                if isinstance(pending, list):
+                    _current_fix_preview = " ".join(b.get("text", "") for b in pending if isinstance(b, dict) and b.get("type") == "text")[:150]
+                else:
+                    _current_fix_preview = pending[:150]
+            else:
+                _current_fix_preview = None
 
             if shutdown_mode:
                 user_msg = GRACEFUL_STOP_PROMPT
@@ -1054,6 +1143,11 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
                     user_msg = fix_preamble + pending + fix_postamble
             elif iteration == 1 and not agent.messages:
                 user_msg = build_initial_message(plan_content, file_listing, upload_images)
+            elif iteration == 1 and agent.messages:
+                plan_content = read_plan_file()
+                user_msg = build_resume_message(plan_content)
+                display.show_info("♻️ Resuming from previous session")
+                telegram.send("♻️ <b>Session resumed</b> — continuing from where we left off.")
             else:
                 plan_content = read_plan_file()
                 user_msg = build_continuation_message(plan_content)
@@ -1092,7 +1186,10 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
 
             if pending and response_text:
                 fix_response = response_text[:3500] if len(response_text) > 3500 else response_text
-                telegram.send(f"📋 <b>Response to your request:</b>\n\n<pre>{telegram.esc(pending[:200])}</pre>\n\n{telegram.esc(fix_response)}")
+                pending_preview = pending[:200] if isinstance(pending, str) else " ".join(b.get("text", "") for b in pending if isinstance(b, dict) and b.get("type") == "text")[:200]
+                remaining_now = _get_queue_size()
+                queue_note = f"\n\n📋 Queue: {remaining_now} more fix(es) pending" if remaining_now > 0 else ""
+                telegram.send(f"📋 <b>Response to your request:</b>\n\n<pre>{telegram.esc(pending_preview)}</pre>\n\n{telegram.esc(fix_response)}{queue_note}")
 
             summary = response_text[:800] if response_text else "(no response)"
             work_desc = _extract_work_description(response_text)
