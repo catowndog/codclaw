@@ -973,22 +973,10 @@ def _handle_ping():
     """Send last 20 lines of agent output to Telegram."""
     lines = config.get_output_log(20)
     if not lines:
-        telegram.send(
-            f"┌─ 📡 <b>PING</b> ────────────\n"
-            f"│\n"
-            f"│  No output yet\n"
-            f"│\n"
-            f"└───────────────────────"
-        )
+        telegram.send("📡 <b>Ping</b> — no output yet")
         return
     text = "\n".join(lines)
-    telegram.send(
-        f"┌─ 📡 <b>PING</b> ── last {len(lines)} lines ──\n"
-        f"│\n"
-        f"<pre>{_tg_escape(text[:3200])}</pre>\n"
-        f"│\n"
-        f"└───────────────────────"
-    )
+    telegram.send(f"📡 <b>Ping</b> (last {len(lines)} lines)\n\n<pre>{_tg_escape(text[:3200])}</pre>")
 
 
 def _tg_escape(text: str) -> str:
@@ -998,11 +986,7 @@ def _tg_escape(text: str) -> str:
 
 def _handle_tasks():
     """Send current tasks + what agent is doing now to Telegram."""
-    header = (
-        f"┌───────────────────────\n"
-        f"│  📋  <b>TASKS</b>\n"
-        f"└───────────────────────\n"
-    )
+    header = "📋 <b>Tasks</b>\n"
 
     sections = []
 
@@ -1029,30 +1013,17 @@ def _handle_tasks():
     else:
         sections.append("  <i>No tasks.md yet</i>")
 
-    body = "\n\n".join(sections) if sections else "  <i>No data</i>"
-    telegram.send(f"{header}\n{body}\n\n━━━━━━━━━━━━━━━━━━━━━")
+    body = "\n\n".join(sections) if sections else "<i>No data</i>"
+    telegram.send(f"{header}\n{body}")
 
 
 def _handle_queue():
     """Send fix queue status to Telegram."""
     size = _fix_queue.qsize()
     if size == 0:
-        telegram.send(
-            f"┌─ 📭 <b>QUEUE</b> ───────────\n"
-            f"│\n"
-            f"│  Empty — working on\n"
-            f"│  regular tasks\n"
-            f"│\n"
-            f"└───────────────────────"
-        )
+        telegram.send("📭 <b>Queue</b> — empty")
     else:
-        telegram.send(
-            f"┌─ 📬 <b>QUEUE</b> ───────────\n"
-            f"│\n"
-            f"│  <b>{size}</b> fix(es) pending\n"
-            f"│\n"
-            f"└───────────────────────"
-        )
+        telegram.send(f"📬 <b>Queue</b> — {size} fix(es) pending")
 
 
 def _handle_status():
@@ -1062,20 +1033,13 @@ def _handle_status():
     queue_size = _fix_queue.qsize()
     current = _current_fix_preview
 
-    header = (
-        f"┌───────────────────────\n"
-        f"│  📊  <b>DASHBOARD</b>\n"
-        f"└───────────────────────\n"
-    )
-
-    lines = [f"\n  {state_icon}  <b>{state_text}</b>\n"]
+    lines = [f"📊 <b>Status</b>\n"]
+    lines.append(f"{state_icon} {state_text}")
 
     if current:
-        lines.append(f"  🔧 Fix: <i>{telegram.esc(current[:100])}</i>")
-    if queue_size > 0:
-        lines.append(f"  📬 Queue: {queue_size} pending")
-    else:
-        lines.append(f"  📭 Queue: empty")
+        lines.append(f"🔧 Fix: <i>{telegram.esc(current[:100])}</i>")
+
+    lines.append(f"{'📬' if queue_size > 0 else '📭'} Queue: {queue_size if queue_size > 0 else 'empty'}")
 
     if _stats:
         def fmt(n):
@@ -1083,15 +1047,12 @@ def _handle_status():
             elif n >= 1_000: return f"{n/1_000:.0f}K"
             return str(n)
 
-        lines.append(f"\n───────────────────")
-        lines.append(f"  📈 Tokens: {fmt(_stats.total_input_tokens)} in / {fmt(_stats.total_output_tokens)} out")
+        lines.append(f"\n📈 {fmt(_stats.total_input_tokens)} in · {fmt(_stats.total_output_tokens)} out")
         if _stats.image_generations > 0:
-            lines.append(f"  🎨 Images: {_stats.image_generations}")
-        lines.append(f"  ⏱  Uptime: {_stats.elapsed_minutes:.1f} min")
-        lines.append(f"───────────────────")
+            lines.append(f"🎨 {_stats.image_generations} images")
+        lines.append(f"⏱ {_stats.elapsed_minutes:.1f} min")
 
-    lines.append(f"\n📱  /fix  /stop  /pause  /queue  /status")
-    telegram.send(header + "\n".join(lines))
+    telegram.send("\n".join(lines))
 
 
 async def _wait_if_paused():
@@ -1379,18 +1340,17 @@ async def run_agent():
                 for i in range(n_agents):
                     agents[i].save_history(config.get_conversation_file(i))
 
-                tg_lines = [f"┌─ 🔄 <b>Iteration #{iteration}</b> (x{n_agents}) ──"]
+                tg_lines = [f"<b>#{iteration}</b> (x{n_agents})\n"]
                 for aid, text in agent_results:
                     preview = _extract_work_description(text) if text else "(no output)"
                     status = "❌" if text.startswith("Error:") else "✅"
-                    tg_lines.append(f"│ Agent {aid}: {status} {telegram.esc(preview[:100])}")
+                    tg_lines.append(f"{status} Agent {aid}: {telegram.esc(preview[:100])}")
                 if stats:
                     def _fmt(n):
                         if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
                         elif n >= 1_000: return f"{n/1_000:.0f}K"
                         return str(n)
-                    tg_lines.append(f"│ 📈 {_fmt(stats.total_input_tokens)} in / {_fmt(stats.total_output_tokens)} out")
-                tg_lines.append(f"└──────────────────────")
+                    tg_lines.append(f"\n📊 {_fmt(stats.total_input_tokens)} in · {_fmt(stats.total_output_tokens)} out")
                 telegram.send("\n".join(tg_lines))
 
             else:
@@ -1440,13 +1400,7 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
                     plan_content = read_plan_file()
                     user_msg = build_resume_message(plan_content)
                     display.show_info("♻️ Resuming from previous session")
-                    telegram.send(
-                        f"┌───────────────────────\n"
-                        f"│  ♻️  <b>SESSION RESUMED</b>\n"
-                        f"└───────────────────────\n\n"
-                        f"  Continuing previous session...\n"
-                        f"  History restored ✓"
-                    )
+                    telegram.send("♻️ <b>Session resumed</b> — history restored ✓")
                 else:
                     plan_content = read_plan_file()
                     user_msg = build_continuation_message(plan_content)
@@ -1487,18 +1441,12 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
                     fix_response = response_text[:2500] if len(response_text) > 2500 else response_text
                     pending_preview = pending[:150] if isinstance(pending, str) else " ".join(b.get("text", "") for b in pending if isinstance(b, dict) and b.get("type") == "text")[:150]
                     remaining_now = _get_queue_size()
-                    queue_line = f"\n│\n│  📋 Queue: {remaining_now} more pending" if remaining_now > 0 else ""
+                    queue_line = f"\n📋 Queue: {remaining_now} more" if remaining_now > 0 else ""
                     telegram.send(
-                        f"┌─ ✅ <b>FIX COMPLETED</b> ──────\n"
-                        f"│\n"
-                        f"│  <b>Request:</b>\n"
-                        f"│  <i>{telegram.esc(pending_preview)}</i>\n"
-                        f"│\n"
-                        f"│  <b>Result:</b>\n"
-                        f"│  {telegram.esc(fix_response[:800])}"
-                        f"{queue_line}\n"
-                        f"│\n"
-                        f"└───────────────────────"
+                        f"✅ <b>Fix done</b>\n\n"
+                        f"<b>Request:</b> <i>{telegram.esc(pending_preview)}</i>\n\n"
+                        f"<b>Result:</b>\n{telegram.esc(fix_response[:800])}"
+                        f"{queue_line}"
                     )
 
                 summary = response_text[:800] if response_text else "(no response)"
