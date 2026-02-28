@@ -41,6 +41,91 @@ def _is_browser_server(server_name: str) -> bool:
     return any(kw in name_lower for kw in _BROWSER_SERVER_KEYWORDS)
 
 
+_chrome_process: subprocess.Popen | None = None
+_CDP_PORT = 9222
+
+def _launch_chrome_for_cdp(display_env: str | None = None) -> str | None:
+    """Launch Chrome with remote debugging and return the CDP URL.
+
+    We launch Chrome ourselves so we can guarantee --no-sandbox,
+    --disable-dev-shm-usage etc. rc-devtools then connects via CDP URL.
+    """
+    global _chrome_process
+
+    if _chrome_process is not None and _chrome_process.poll() is None:
+        return f"http://127.0.0.1:{_CDP_PORT}"
+
+    chrome_bin = shutil.which("google-chrome") or shutil.which("chromium-browser") or shutil.which("chromium")
+    if not chrome_bin:
+        display.show_warning("Chrome not found — cannot launch for CDP")
+        return None
+
+    chrome_args = [
+        chrome_bin,
+        f"--remote-debugging-port={_CDP_PORT}",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--window-size=1920,1080",
+        f"--user-data-dir=/tmp/codclaw-chrome-profile",
+        "about:blank",
+    ]
+
+    env = dict(os.environ)
+    if display_env:
+        env["DISPLAY"] = display_env
+
+    try:
+        _chrome_process = subprocess.Popen(
+            chrome_args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        import time as _time
+        import http.client
+        for attempt in range(30):
+            _time.sleep(0.5)
+            if _chrome_process.poll() is not None:
+                display.show_warning(f"Chrome exited with code {_chrome_process.returncode}")
+                _chrome_process = None
+                return None
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", _CDP_PORT, timeout=1)
+                conn.request("GET", "/json/version")
+                resp = conn.getresponse()
+                if resp.status == 200:
+                    display.show_info(f"  🌐 Chrome CDP ready on port {_CDP_PORT} (attempt {attempt + 1})")
+                    conn.close()
+                    return f"http://127.0.0.1:{_CDP_PORT}"
+                conn.close()
+            except Exception:
+                pass
+
+        display.show_warning(f"Chrome started but CDP not available after 15s")
+        return None
+    except Exception as e:
+        display.show_warning(f"Failed to launch Chrome: {e}")
+        return None
+
+
+def stop_chrome():
+    """Stop the Chrome process if running."""
+    global _chrome_process
+    if _chrome_process is not None:
+        try:
+            _chrome_process.send_signal(signal.SIGTERM)
+            _chrome_process.wait(timeout=5)
+        except Exception:
+            try:
+                _chrome_process.kill()
+            except Exception:
+                pass
+        _chrome_process = None
+
+
 def start_virtual_display() -> str | None:
     """Start Xvfb virtual display if on Linux and HEADLESS_BROWSER=true.
 
@@ -251,11 +336,22 @@ class MCPManager:
         if env:
             server_env.update(env)
 
-        if _is_browser_server(name) and app_config.VIRTUAL_DISPLAY and sys.platform == "linux":
-            vdisplay = start_virtual_display()
-            if vdisplay:
-                server_env["DISPLAY"] = vdisplay
-                display.show_info(f"  🖥️  {name}: virtual display {vdisplay}")
+        if _is_browser_server(name) and sys.platform == "linux":
+            if app_config.VIRTUAL_DISPLAY:
+                vdisplay = start_virtual_display()
+                if vdisplay:
+                    server_env["DISPLAY"] = vdisplay
+                    display.show_info(f"  🖥️  {name}: virtual display {vdisplay}")
+
+            cdp_url = _launch_chrome_for_cdp(server_env.get("DISPLAY"))
+            if cdp_url:
+                if not any("--cdp-url" in a for a in args):
+                    args.append(f"--cdp-url={cdp_url}")
+                display.show_info(f"  🔧 {name}: Chrome launched, CDP at {cdp_url}")
+            else:
+                if "--no-sandbox" not in args:
+                    args.append("--no-sandbox")
+                display.show_warning(f"  {name}: could not launch Chrome, falling back to --no-sandbox")
 
         server_params = StdioServerParameters(
             command=command,
@@ -372,4 +468,5 @@ class MCPManager:
             self.sessions.clear()
             self.server_tools.clear()
             self.tool_routing.clear()
+            stop_chrome()
             stop_virtual_display()

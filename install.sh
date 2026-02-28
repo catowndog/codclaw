@@ -4,6 +4,11 @@
 #  Usage:  sudo bash install.sh
 #          sudo bash install.sh --uninstall
 # ──────────────────────────────────────────────────────────────
+
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
+fi
+
 set -euo pipefail
 
 INSTALL_DIR="/opt/codclaw"
@@ -172,11 +177,13 @@ ok "Package lists updated"
 SYS_PKGS=(
     git curl wget unzip build-essential software-properties-common
     xvfb
-    fonts-liberation fonts-noto fonts-noto-color-emoji fontconfig
+    fonts-liberation fonts-noto fonts-noto-cjk fonts-noto-color-emoji fontconfig
     libatk-bridge2.0-0 libatk1.0-0 libcups2 libdrm2 libgbm1
-    libgtk-3-0 libnspr4 libnss3 libxcomposite1 libxdamage1
-    libxrandr2 xdg-utils libu2f-udev libvulkan1 libxkbcommon0
-    libpq-dev
+    libgtk-3-0 libgtk-4-1 libnspr4 libnss3 libxcomposite1 libxdamage1
+    libxrandr2 libxss1 libxtst6 xdg-utils libu2f-udev libvulkan1 libxkbcommon0
+    libasound2t64 libpango-1.0-0 libcairo2 libx11-xcb1
+    libpq-dev default-libmysqlclient-dev
+    dbus dbus-x11
 )
 
 info "Installing ${#SYS_PKGS[@]} packages..."
@@ -244,6 +251,18 @@ else
     rm -f "$CHROME_DEB"
     ok "$(google-chrome --version 2>&1 | head -1)"
 fi
+
+info "Verifying Chrome launch..."
+Xvfb :98 -screen 0 1920x1080x24 -ac > /dev/null 2>&1 &
+XVFB_TEST_PID=$!
+sleep 0.5
+if DISPLAY=:98 google-chrome --no-sandbox --disable-dev-shm-usage --disable-gpu --headless=new --dump-dom about:blank > /dev/null 2>&1; then
+    ok "Chrome launches successfully on virtual display"
+else
+    err "Chrome failed to launch — check dependencies"
+    echo -e "  ${DIM}Try: apt install -y libnss3 libgbm1 libgtk-3-0 libasound2t64${NC}"
+fi
+kill "$XVFB_TEST_PID" 2>/dev/null; rm -f /tmp/.X98-lock 2>/dev/null
 
 progress_bar 60
 
