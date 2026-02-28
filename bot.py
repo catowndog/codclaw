@@ -49,7 +49,7 @@ _stop_requested = False
 _stop_shown = False
 _pause_requested = False
 _original_term_settings = None
-_pending_user_message: str | None = None
+_pending_user_message: str | list | None = None
 _input_queue: queue.Queue = queue.Queue()
 _stdin_thread: threading.Thread | None = None
 _pause_event = threading.Event()
@@ -885,11 +885,34 @@ def _telegram_poller_thread():
             if commands.get("tasks"):
                 _handle_tasks()
             for fix in commands["fixes"]:
-                if _pending_user_message is None:
-                    _pending_user_message = fix
+                if isinstance(fix, dict):
+                    fix_text = fix["text"]
+                    image_blocks = []
+                    for img in fix.get("images", []):
+                        image_blocks.append({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": img["media_type"],
+                                "data": img["data"],
+                            },
+                        })
+                    if _pending_user_message is None:
+                        _pending_user_message = [{"type": "text", "text": fix_text}] + image_blocks
+                    elif isinstance(_pending_user_message, list):
+                        _pending_user_message.append({"type": "text", "text": " | " + fix_text})
+                        _pending_user_message.extend(image_blocks)
+                    else:
+                        _pending_user_message = [{"type": "text", "text": _pending_user_message + " | " + fix_text}] + image_blocks
+                    display.show_info(f"TG /fix + 🖼 received: [bold]{fix_text[:100]}[/bold]")
                 else:
-                    _pending_user_message += " | " + fix
-                display.show_info(f"TG /fix received: [bold]{fix[:100]}[/bold]")
+                    if _pending_user_message is None:
+                        _pending_user_message = fix
+                    elif isinstance(_pending_user_message, list):
+                        _pending_user_message.append({"type": "text", "text": " | " + fix})
+                    else:
+                        _pending_user_message += " | " + fix
+                    display.show_info(f"TG /fix received: [bold]{fix[:100]}[/bold]")
         except Exception:
             pass
         time.sleep(2)
@@ -1011,14 +1034,24 @@ async def run_agent():
             if shutdown_mode:
                 user_msg = GRACEFUL_STOP_PROMPT
             elif pending:
-                display.show_info(f"Injecting user message: [bold]{pending[:100]}[/bold]")
-                user_msg = f"""URGENT MESSAGE FROM THE OPERATOR (highest priority):
+                fix_preamble = """URGENT MESSAGE FROM THE OPERATOR (highest priority):
 
-{pending}
+"""
+                fix_postamble = """
 
 Handle this request IMMEDIATELY before continuing with your regular tasks.
 IMPORTANT: Use `send_message()` to report back the results to the operator via Telegram. The operator is waiting for a response — send command output, logs, screenshots, confirmation, etc.
 After completing it, update .temp/tasks.md and continue with your normal workflow."""
+
+                if isinstance(pending, list):
+                    text_preview = " ".join(b.get("text", "") for b in pending if b.get("type") == "text")[:100]
+                    img_count = sum(1 for b in pending if b.get("type") == "image")
+                    display.show_info(f"Injecting user message + {img_count} image(s): [bold]{text_preview}[/bold]")
+                    user_msg = [{"type": "text", "text": fix_preamble}] + pending + [{"type": "text", "text": fix_postamble}]
+                    pending = text_preview
+                else:
+                    display.show_info(f"Injecting user message: [bold]{pending[:100]}[/bold]")
+                    user_msg = fix_preamble + pending + fix_postamble
             elif iteration == 1 and not agent.messages:
                 user_msg = build_initial_message(plan_content, file_listing, upload_images)
             else:

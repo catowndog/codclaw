@@ -142,10 +142,20 @@ def _convert_messages_to_openai(messages: list[dict], system: str) -> list[dict]
             tool_calls_out = []
             tool_results_out = []
 
+            image_parts = []
             for block in content:
                 bt = block.get("type", "")
                 if bt == "text":
                     text_parts.append(block.get("text", ""))
+                elif bt == "image":
+                    src = block.get("source", {})
+                    if src.get("type") == "base64":
+                        image_parts.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{src.get('media_type', 'image/jpeg')};base64,{src.get('data', '')}",
+                            },
+                        })
                 elif bt == "thinking":
                     pass
                 elif bt == "redacted_thinking":
@@ -175,6 +185,13 @@ def _convert_messages_to_openai(messages: list[dict], system: str) -> list[dict]
                 if tool_results_out:
                     for tr in tool_results_out:
                         openai_msgs.append(tr)
+                elif image_parts:
+                    # Multi-modal: text + images as content array
+                    parts = []
+                    if text_parts:
+                        parts.append({"type": "text", "text": "\n".join(text_parts)})
+                    parts.extend(image_parts)
+                    openai_msgs.append({"role": "user", "content": parts})
                 elif text_parts:
                     openai_msgs.append({"role": "user", "content": "\n".join(text_parts)})
                 else:
@@ -1007,7 +1024,7 @@ class LLMAgent:
 
         return result
 
-    async def run_turn(self, user_content: str, system: str, check_interrupt: Callable[[], bool] | None = None, check_pause: Callable[[], Any] | None = None) -> str:
+    async def run_turn(self, user_content: str | list, system: str, check_interrupt: Callable[[], bool] | None = None, check_pause: Callable[[], Any] | None = None) -> str:
         """Run a complete agent turn with Starlark-based tool calling.
 
         The LLM writes ```starlark code blocks in its text response.
@@ -1195,11 +1212,17 @@ class LLMAgent:
             elif isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict):
+                        if block.get("type") == "image":
+                            total_chars += 4800  
+                            continue
                         for v in block.values():
                             if isinstance(v, str):
                                 total_chars += len(v)
                             elif isinstance(v, dict):
-                                total_chars += len(json.dumps(v))
+                                if "data" in v and "media_type" in v:
+                                    total_chars += 4800
+                                else:
+                                    total_chars += len(json.dumps(v))
         return total_chars // 3
 
     def _get_context_window(self) -> int:
@@ -1305,10 +1328,30 @@ class LLMAgent:
         self.messages.clear()
         self._var_store.clear()
 
+    @staticmethod
+    def _strip_images(messages: list[dict]) -> list[dict]:
+        """Return a copy of messages with image blocks replaced by text placeholders.
+        Keeps conversation history lightweight — images are for prompt only, never saved.
+        """
+        cleaned = []
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                new_blocks = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "image":
+                        new_blocks.append({"type": "text", "text": "[image was attached]"})
+                    else:
+                        new_blocks.append(block)
+                cleaned.append({**msg, "content": new_blocks})
+            else:
+                cleaned.append(msg)
+        return cleaned
+
     def save_history(self, filepath: str):
         try:
             with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(self.messages, f, ensure_ascii=False, indent=2)
+                json.dump(self._strip_images(self.messages), f, ensure_ascii=False, indent=2)
         except Exception as e:
             display.show_warning(f"Failed to save conversation: {e}")
 
