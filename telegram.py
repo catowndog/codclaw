@@ -6,6 +6,7 @@ Supports:
 - Polling commands: /fix, /stop, /pause, /resume (async — non-blocking)
 """
 
+import base64
 import time
 
 import httpx
@@ -134,6 +135,37 @@ def notify_skill_done(skill_name: str, skill_size: int, first_lines: str = "", f
 
 
 
+def _download_file_base64(file_id: str) -> tuple[str | None, str | None]:
+    """Download a Telegram file by file_id → (base64_data, mime_type) or (None, None)."""
+    if not config.TG_BOT_TOKEN:
+        return None, None
+    try:
+        resp = httpx.get(
+            f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/getFile",
+            params={"file_id": file_id}, timeout=10,
+        )
+        if resp.status_code != 200:
+            return None, None
+        file_path = resp.json().get("result", {}).get("file_path", "")
+        if not file_path:
+            return None, None
+
+        ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else "jpg"
+        mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                    "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp"}
+        mime = mime_map.get(ext, "image/jpeg")
+
+        dl = httpx.get(
+            f"https://api.telegram.org/file/bot{config.TG_BOT_TOKEN}/{file_path}",
+            timeout=30,
+        )
+        if dl.status_code != 200:
+            return None, None
+        return base64.b64encode(dl.content).decode("utf-8"), mime
+    except Exception:
+        return None, None
+
+
 _last_update_id = 0
 
 
@@ -227,9 +259,24 @@ def _parse_updates(updates: list[dict]) -> dict:
         msg = update.get("message", {})
         if str(msg.get("from", {}).get("id", "")) != str(config.TG_USER_ID):
             continue
-        text = (msg.get("text", "") or "").strip()
+        text = (msg.get("text", "") or msg.get("caption", "") or "").strip()
 
-        if text.startswith("/fix"):
+        if msg.get("photo") and text.startswith("/fix"):
+            fix_text = text[4:].strip() or "See attached image"
+            photo_sizes = msg["photo"]
+            best = max(photo_sizes, key=lambda p: p.get("file_size", p.get("width", 0)))
+            b64_data, mime = _download_file_base64(best["file_id"])
+            if b64_data:
+                result["fixes"].append({
+                    "text": fix_text,
+                    "images": [{"data": b64_data, "media_type": mime}],
+                })
+                send(f"✅ Fix + 🖼 image received!\n\n<i>{esc(fix_text[:300])}</i>")
+            else:
+                result["fixes"].append(fix_text)
+                send(f"✅ Fix received (⚠️ image download failed)\n\n<i>{esc(fix_text[:300])}</i>")
+
+        elif text.startswith("/fix"):
             fix_text = text[4:].strip()
             if fix_text:
                 result["fixes"].append(fix_text)
