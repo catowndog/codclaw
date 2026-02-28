@@ -1240,7 +1240,6 @@ async def run_agent():
     _start_stdin_thread()
 
     if config.REFERENCE_SITES:
-        # Skip reference site crawling if the project already has files (not just .temp/)
         _existing = [f for f in os.listdir(config.PROJECT_PATH) if f != ".temp" and not f.startswith(".")]
         if _existing:
             display.show_info(f"Project already has files ({len(_existing)} items) — skipping reference sites crawl")
@@ -1254,20 +1253,16 @@ async def run_agent():
         loaded = False
         compressed_count = 0
 
-        # Try conversation.json first
         if os.path.exists(conv_file):
             loaded = a.load_history(conv_file)
             if loaded:
                 compressed_count = len(a.messages)
 
-        # If conversation.json is missing/empty but conversation_full.json exists — use it
         if not loaded and conv_full_file and os.path.exists(conv_full_file):
             if a.load_history(conv_full_file):
                 loaded = True
                 display.show_info(f"Restored from conversation_full.json ({len(a.messages)} messages)")
         elif loaded and conv_full_file and os.path.exists(conv_full_file):
-            # If conversation.json loaded but is compressed (few messages),
-            # and conversation_full.json has more context — prefer full
             try:
                 with open(conv_full_file, "r", encoding="utf-8") as _f:
                     full_msgs = json.load(_f)
