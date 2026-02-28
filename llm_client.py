@@ -186,7 +186,6 @@ def _convert_messages_to_openai(messages: list[dict], system: str) -> list[dict]
                     for tr in tool_results_out:
                         openai_msgs.append(tr)
                 elif image_parts:
-                    # Multi-modal: text + images as content array
                     parts = []
                     if text_parts:
                         parts.append({"type": "text", "text": "\n".join(text_parts)})

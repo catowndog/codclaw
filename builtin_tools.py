@@ -311,9 +311,10 @@ _MAX_OUTPUT = 50_000
 class BuiltinTools:
     """Executes built-in tools: shell, database, file ops, HTTP."""
 
-    def __init__(self, project_path: str, database_url: str = ""):
+    def __init__(self, project_path: str, database_url: str = "", token_stats=None):
         self.project_path = Path(project_path).resolve()
         self.database_url = database_url
+        self.stats = token_stats
 
 
     async def execute_tool(self, tool_name: str, tool_args: dict) -> str:
@@ -931,6 +932,10 @@ class BuiltinTools:
                     return f"Error: Image API returned {resp.status_code}: {resp.text[:500]}"
 
                 data = resp.json()
+
+                if self.stats:
+                    self.stats.add_image()
+
                 choices = data.get("choices", [])
                 if not choices:
                     return f"Error: No choices in response: {json.dumps(data)[:300]}"

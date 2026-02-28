@@ -79,57 +79,103 @@ def send_file(file_path: str, caption: str = "") -> bool:
 
 
 def notify_start(agent_name: str, project_path: str, model: str, mcp_servers: list[str] = None, tools_count: int = 0, skills_count: int = 0):
-    mcp_list = "\n".join(f"  • {s}" for s in mcp_servers) if mcp_servers else "none"
+    mcp_list = "\n".join(f"  ▸ {s}" for s in mcp_servers) if mcp_servers else "  ▸ none"
     db = config.DATABASE_URL.split("@")[-1] if config.DATABASE_URL and "@" in config.DATABASE_URL else (config.DATABASE_URL or "disabled")
     refs = ", ".join(config.REFERENCE_SITES) if config.REFERENCE_SITES else "none"
+    project_name = project_path.rstrip("/").split("/")[-1]
     send(
-        f"🚀 <b>{agent_name}</b> started\n\n"
-        f"📁 Project: <code>{project_path}</code>\n"
-        f"🧠 Model: {model}\n"
-        f"⚡ Max tokens: {config.MAX_TOKENS:,}\n"
-        f"⏱ Delay: {config.DELAY}s\n"
-        f"💭 Thinking: {'on' if config.SHOW_THINKING else 'off'}\n"
-        f"🔧 Tools: {tools_count} | Skills: {skills_count}\n"
-        f"🗄 DB: {db}\n"
-        f"🌐 Reference sites: {refs}\n\n"
-        f"🔌 MCP:\n{mcp_list}\n\n"
-        f"📱 Commands: /fix /stop /pause /resume /ping /tasks /queue /status"
+        f"┌───────────────────────\n"
+        f"│  🚀  <b>{esc(agent_name).upper()} STARTED</b>\n"
+        f"└───────────────────────\n\n"
+        f"  📁  <code>{esc(project_name)}</code>\n"
+        f"  🧠  {esc(model)}\n"
+        f"  ⚡  {config.MAX_TOKENS:,} tokens\n"
+        f"  ⏱   {config.DELAY}s delay\n\n"
+        f"┌─ Config ─────────────\n"
+        f"│  💭 Thinking: {'on' if config.SHOW_THINKING else 'off'}\n"
+        f"│  🔧 Tools: {tools_count}  Skills: {skills_count}\n"
+        f"│  🗄 DB: {esc(db)}\n"
+        f"│  🌐 Refs: {esc(refs)}\n"
+        f"└───────────────────────\n\n"
+        f"🔌 <b>MCP Servers:</b>\n{mcp_list}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📱  /fix  /stop  /pause  /resume\n"
+        f"      /ping  /tasks  /queue  /status"
     )
 
 
-def notify_stop(agent_name: str, iterations: int, total_cost: float = 0):
-    cost = f"\n💰 ${total_cost:.4f}" if total_cost > 0 else ""
-    send(f"🛑 <b>{agent_name}</b> stopped\n\n{iterations} iterations{cost}")
+def notify_stop(agent_name: str, iterations: int, image_count: int = 0):
+    img_line = f"\n  🎨  {image_count} images" if image_count > 0 else ""
+    send(
+        f"┌───────────────────────\n"
+        f"│  🛑  <b>AGENT STOPPED</b>\n"
+        f"└───────────────────────\n\n"
+        f"  ⏱   {iterations} iterations{img_line}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━"
+    )
 
 
 def notify_iteration(iteration: int, agent_name: str, summary: str, tokens_in: int = 0, tokens_out: int = 0, tasks_preview: str = "", work_description: str = ""):
-    work_section = f"\n\n🔨 <b>Working on:</b>\n{esc(work_description)}" if work_description else ""
-    tasks_section = f"\n\n📋 <b>Tasks:</b>\n{esc(tasks_preview)}" if tasks_preview else ""
+    work_section = f"\n🔨 <b>Working on:</b>\n<i>{esc(work_description[:300])}</i>" if work_description else ""
+    tasks_lines = ""
+    if tasks_preview:
+        for line in tasks_preview.split("\n")[:5]:
+            clean = line.strip().lstrip("- [ ]").strip()
+            if clean:
+                tasks_lines += f"\n  ○ {esc(clean[:80])}"
+        if tasks_lines:
+            tasks_lines = f"\n\n📋 <b>Tasks:</b>{tasks_lines}"
+
+    def fmt_tokens(n):
+        if n >= 1_000_000:
+            return f"{n/1_000_000:.1f}M"
+        elif n >= 1_000:
+            return f"{n/1_000:.0f}K"
+        return str(n)
+
     send(
-        f"🤖 <b>{agent_name}</b> — iteration #{iteration}"
+        f"━━━  <b>Iteration #{iteration}</b>  ━━━"
         f"{work_section}\n\n"
-        f"<b>Done this iteration:</b>\n{esc(summary)}\n"
-        f"{tasks_section}\n"
-        f"📊 {tokens_in:,} in / {tokens_out:,} out"
+        f"📝 <b>Done:</b>\n{esc(summary[:800])}\n"
+        f"{tasks_lines}\n\n"
+        f"───────────────────\n"
+        f"📊  {fmt_tokens(tokens_in)} in │ {fmt_tokens(tokens_out)} out"
     )
 
 
 def notify_error(agent_name: str, error: str):
-    send(f"❌ <b>{agent_name}</b>\n\n<code>{esc(error[:2000])}</code>")
+    send(
+        f"⚠️━━━ <b>ERROR</b> ━━━⚠️\n\n"
+        f"<code>{esc(error[:2000])}</code>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━"
+    )
 
 
 def notify_tool_call(tool_name: str, args_preview: str = ""):
     preview = f"\n<code>{esc(args_preview[:300])}</code>" if args_preview else ""
-    send(f"🔧 <b>{tool_name}</b>{preview}")
+    send(f"  🔧 <b>{tool_name}</b>{preview}")
 
 
 def notify_skill_start(skill_description: str):
-    send(f"📝 Creating skill...\n\n<i>{skill_description[:500]}</i>")
+    send(
+        f"┌─ 📝 <b>CREATING SKILL</b> ────\n"
+        f"│\n"
+        f"│  <i>{esc(skill_description[:400])}</i>\n"
+        f"│\n"
+        f"└───────────────────────"
+    )
 
 
 def notify_skill_done(skill_name: str, skill_size: int, first_lines: str = "", file_path: str = ""):
-    preview = f"\n\n{first_lines[:300]}" if first_lines else ""
-    send(f"✅ <b>{skill_name}.md</b> ({skill_size:,} chars){preview}")
+    preview = f"\n│  {esc(first_lines[:250])}" if first_lines else ""
+    send(
+        f"┌─ ✅ <b>SKILL CREATED</b> ─────\n"
+        f"│\n"
+        f"│  📄 <b>{esc(skill_name)}.md</b>\n"
+        f"│  📏 {skill_size:,} chars{preview}\n"
+        f"│\n"
+        f"└───────────────────────"
+    )
     if file_path:
         send_file(file_path, caption=f"📎 {skill_name}.md")
 
@@ -271,30 +317,66 @@ def _parse_updates(updates: list[dict]) -> dict:
                     "text": fix_text,
                     "images": [{"data": b64_data, "media_type": mime}],
                 })
-                send(f"✅ Fix + 🖼 image received!\n\n<i>{esc(fix_text[:300])}</i>")
+                send(
+                    f"┌─ 📥 <b>FIX + 🖼 QUEUED</b> ────\n"
+                    f"│\n"
+                    f"│  <i>{esc(fix_text[:250])}</i>\n"
+                    f"│  🖼 Image attached\n"
+                    f"│\n"
+                    f"└───────────────────────"
+                )
             else:
                 result["fixes"].append(fix_text)
-                send(f"✅ Fix received (⚠️ image download failed)\n\n<i>{esc(fix_text[:300])}</i>")
+                send(
+                    f"┌─ 📥 <b>FIX QUEUED</b> ─────────\n"
+                    f"│\n"
+                    f"│  <i>{esc(fix_text[:250])}</i>\n"
+                    f"│  ⚠️ Image download failed\n"
+                    f"│\n"
+                    f"└───────────────────────"
+                )
 
         elif text.startswith("/fix"):
             fix_text = text[4:].strip()
             if fix_text:
                 result["fixes"].append(fix_text)
-                send(f"✅ Fix request received!\n\n<i>{esc(fix_text[:300])}</i>")
+                send(
+                    f"┌─ 📥 <b>FIX QUEUED</b> ─────────\n"
+                    f"│\n"
+                    f"│  <i>{esc(fix_text[:250])}</i>\n"
+                    f"│\n"
+                    f"└───────────────────────"
+                )
             else:
                 send("⚠️ Usage: <code>/fix describe what to fix</code>")
 
         elif text == "/stop":
             result["stop"] = True
-            send("🛑 <b>STOP</b> command received — agent is wrapping up...")
+            send(
+                f"┌───────────────────────\n"
+                f"│  🛑  <b>STOPPING</b>\n"
+                f"└───────────────────────\n\n"
+                f"  Agent is wrapping up...\n"
+                f"  This may take 3-5 min."
+            )
 
         elif text == "/pause":
             result["pause"] = True
-            send("⏸ <b>PAUSE</b> command received — agent paused.")
+            send(
+                f"┌───────────────────────\n"
+                f"│  ⏸  <b>PAUSED</b>\n"
+                f"└───────────────────────\n\n"
+                f"  Send /resume to continue."
+            )
 
         elif text == "/resume":
             result["resume"] = True
-            send("▶️ <b>RESUME</b> command received — agent continuing.")
+            send(
+                f"┌───────────────────────\n"
+                f"│  ▶️  <b>RESUMED</b>\n"
+                f"└───────────────────────\n\n"
+                f"  Agent continuing work..."
+            )
 
         elif text == "/ping":
             result["ping"] = True
