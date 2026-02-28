@@ -1210,7 +1210,8 @@ async def run_agent():
 
     for i, a in enumerate(agents):
         conv_file = config.get_conversation_file(i)
-        conv_full_file = os.path.join(config.TEMP_DIR, "conversation_full.json") if i == 0 else ""
+        _suffix = f"_{i + 1}" if i > 0 else ""
+        conv_full_file = os.path.join(config.TEMP_DIR, f"conversation{_suffix}_full.json")
         loaded = False
         compressed_count = 0
 
@@ -1219,11 +1220,11 @@ async def run_agent():
             if loaded:
                 compressed_count = len(a.messages)
 
-        if not loaded and conv_full_file and os.path.exists(conv_full_file):
+        if not loaded and os.path.exists(conv_full_file):
             if a.load_history(conv_full_file):
                 loaded = True
-                display.show_info(f"Restored from conversation_full.json ({len(a.messages)} messages)")
-        elif loaded and conv_full_file and os.path.exists(conv_full_file):
+                display.show_info(f"Restored from {os.path.basename(conv_full_file)} ({len(a.messages)} messages)")
+        elif loaded and os.path.exists(conv_full_file):
             try:
                 with open(conv_full_file, "r", encoding="utf-8") as _f:
                     full_msgs = json.load(_f)
@@ -1344,7 +1345,7 @@ async def run_agent():
                 for aid, text in agent_results:
                     preview = _extract_work_description(text) if text else "(no output)"
                     status = "❌" if text.startswith("Error:") else "✅"
-                    tg_lines.append(f"{status} Agent {aid}: {telegram.esc(preview[:100])}")
+                    tg_lines.append(f"{status} Agent {aid}: {telegram.md_to_tg(preview[:100])}")
                 if stats:
                     def _fmt(n):
                         if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
@@ -1445,7 +1446,7 @@ After completing it, update .temp/tasks.md and continue with your normal workflo
                     telegram.send(
                         f"✅ <b>Fix done</b>\n\n"
                         f"<b>Request:</b> <i>{telegram.esc(pending_preview)}</i>\n\n"
-                        f"<b>Result:</b>\n{telegram.esc(fix_response[:800])}"
+                        f"<b>Result:</b>\n{telegram.md_to_tg(fix_response[:800])}"
                         f"{queue_line}"
                     )
 

@@ -21,6 +21,68 @@ def esc(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def md_to_tg(text: str) -> str:
+    """Convert markdown-style text to Telegram HTML.
+
+    - ```lang\\ncode``` → <pre>code</pre>  (unclosed ``` handled too)
+    - **bold** → <b>bold</b>
+    - `inline` → <i>inline</i>
+    - Lines starting with # → <b>heading</b>
+    """
+    import re
+
+    # First escape HTML in the raw text
+    text = esc(text)
+
+    # Code blocks: ```...``` (with optional language tag)
+    # Handle both closed and unclosed blocks
+    def _replace_code_block(m):
+        code = m.group(1).strip()
+        # Remove optional language identifier on first line
+        lines = code.split("\n")
+        if lines and re.match(r'^[a-zA-Z_]+$', lines[0].strip()):
+            code = "\n".join(lines[1:]).strip()
+        if not code:
+            return ""
+        return f"<pre>{code}</pre>"
+
+    # Closed code blocks
+    text = re.sub(r'```[a-zA-Z_]*\n(.*?)```', _replace_code_block, text, flags=re.DOTALL)
+    # Unclosed code block at end of text
+    m = re.search(r'```[a-zA-Z_]*\n(.+)$', text, flags=re.DOTALL)
+    if m:
+        code = m.group(1).strip()
+        lines = code.split("\n")
+        if lines and re.match(r'^[a-zA-Z_]+$', lines[0].strip()):
+            code = "\n".join(lines[1:]).strip()
+        if code:
+            text = text[:m.start()] + f"<pre>{code}</pre>"
+
+    # Bold: **text**
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+
+    # Inline code: `text`
+    text = re.sub(r'`([^`]+?)`', r'<i>\1</i>', text)
+
+    # Headings: lines starting with # → bold
+    lines = text.split("\n")
+    result = []
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            clean = stripped.lstrip("#").strip()
+            if clean:
+                result.append(f"<b>{clean}</b>")
+            continue
+        result.append(line)
+    text = "\n".join(result)
+
+    # Clean up excessive newlines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    return text.strip()
+
+
 
 def send(text: str, parse_mode: str = "HTML") -> bool:
     global _last_send_time
@@ -120,7 +182,7 @@ def notify_iteration(iteration: int, agent_name: str, summary: str, tokens_in: i
 
     send(
         f"<b>#{iteration}</b>{work}\n\n"
-        f"📝 {esc(summary[:600])}"
+        f"📝 {md_to_tg(summary[:600])}"
         f"{tasks_lines}\n\n"
         f"📊 {fmt(tokens_in)} in · {fmt(tokens_out)} out"
     )

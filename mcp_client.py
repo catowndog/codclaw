@@ -404,6 +404,7 @@ class MCPManager:
     async def call_tool(self, prefixed_name: str, arguments: dict) -> str:
         """
         Route a tool call to the correct MCP server and return the result.
+        Sets self._last_binary_data per-call (callers should read it immediately after).
         """
         if prefixed_name not in self.tool_routing:
             return f"Unknown MCP tool: {prefixed_name}"
@@ -419,25 +420,27 @@ class MCPManager:
 
             if hasattr(result, "content") and result.content:
                 parts = []
-                self._last_binary_data = None
+                binary_data = None
                 for item in result.content:
                     if hasattr(item, "data") and item.data:
-                        self._last_binary_data = item.data
+                        binary_data = item.data
                         parts.append(f"[binary data: {len(item.data)} bytes]")
                     elif hasattr(item, "text"):
                         text = item.text or ""
                         parts.append(text)
-                        if not self._last_binary_data and len(text) > 500:
+                        if not binary_data and len(text) > 500:
                             import re as _re
                             _m = _re.search(r'data:image/[^;]+;base64,([A-Za-z0-9+/=]{100,})', text)
                             if _m:
-                                self._last_binary_data = _m.group(1)
+                                binary_data = _m.group(1)
                             elif _re.match(r'^[A-Za-z0-9+/=]{500,}$', text.strip()):
-                                self._last_binary_data = text.strip()
+                                binary_data = text.strip()
                     else:
                         parts.append(str(item))
+                self._last_binary_data = binary_data
                 return "\n".join(parts)
             else:
+                self._last_binary_data = None
                 return str(result)
 
         except Exception as e:
