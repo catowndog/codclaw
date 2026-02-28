@@ -240,6 +240,8 @@ BUILTIN_TOOLS = [
         "description": (
             "Generate an image using AI and save it to a file in PROJECT_PATH. "
             "Use for creating icons, illustrations, backgrounds, hero images, logos, etc. "
+            "Supports OpenAI and Gemini providers (configured via IMAGE_API_PROVIDER). "
+            "If image generation is disabled, returns an error — use placeholders instead. "
             "Returns the saved file path on success."
         ),
         "input_schema": {
@@ -890,7 +892,7 @@ class BuiltinTools:
             return f"HTTP error: {type(e).__name__}: {e}"
 
     async def _generate_image(self, args: dict) -> str:
-        """Generate an image via OpenAI-compatible chat completions API (gpt-5-image)."""
+        """Generate an image via configured IMAGE_API_PROVIDER (openai/gemini) or return disabled message."""
         prompt = args.get("prompt", "")
         filename = args.get("filename", "")
         size = args.get("size", "1024x1024")
@@ -900,9 +902,23 @@ class BuiltinTools:
         if not filename:
             return "Error: 'filename' is required"
 
+        import config as cfg
+
+        provider = cfg.IMAGE_API_PROVIDER
+        if not provider:
+            return "Image generation is disabled (IMAGE_API_PROVIDER is not set in .env). Skip image generation and use placeholder or existing assets instead."
+
+        if provider == "gemini":
+            return await self._generate_image_gemini(prompt, filename, size, cfg)
+        elif provider == "openai":
+            return await self._generate_image_openai(prompt, filename, size, cfg)
+        else:
+            return f"Error: Unknown IMAGE_API_PROVIDER '{provider}'. Use 'openai', 'gemini', or leave empty to disable."
+
+    async def _generate_image_openai(self, prompt: str, filename: str, size: str, cfg) -> str:
+        """Generate an image via OpenAI-compatible chat completions API."""
         try:
             import httpx
-            import config as cfg
             import base64
         except ImportError as e:
             return f"Error: missing dependency: {e}"
@@ -911,8 +927,10 @@ class BuiltinTools:
         if not base.endswith("/chat/completions"):
             base += "/chat/completions"
 
+        model = cfg.get_image_model()
+
         body = {
-            "model": cfg.IMAGE_MODEL,
+            "model": model,
             "messages": [
                 {"role": "user", "content": f"Generate image ({size}): {prompt}"}
             ],
@@ -998,21 +1016,90 @@ class BuiltinTools:
                 if not img_bytes:
                     return f"Error: No image found in response. Content: {str(content)[:500]}"
 
-            filepath = self._resolve_path(filename)
-            filepath.parent.mkdir(parents=True, exist_ok=True)
-            with open(filepath, "wb") as f:
-                f.write(img_bytes)
-
-            try:
-                import telegram
-                telegram.send_photo_bytes(img_bytes, f"🎨 {filename}")
-            except Exception:
-                pass
-
-            return f"Image saved: {filename} ({len(img_bytes):,} bytes)"
+            return await self._save_image(img_bytes, filename)
 
         except Exception as e:
-            return f"Error generating image: {type(e).__name__}: {e}"
+            return f"Error generating image (OpenAI): {type(e).__name__}: {e}"
+
+    async def _generate_image_gemini(self, prompt: str, filename: str, size: str, cfg) -> str:
+        """Generate an image via Google Gemini API."""
+        try:
+            import httpx
+            import base64
+        except ImportError as e:
+            return f"Error: missing dependency: {e}"
+
+        if not cfg.GEMINI_API_KEY:
+            return "Error: GEMINI_API_KEY is not set in .env (required when IMAGE_API_PROVIDER=gemini)"
+
+        model = cfg.get_image_model()
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={cfg.GEMINI_API_KEY}"
+
+        body = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": f"Generate an image ({size}): {prompt}"}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "responseModalities": ["TEXT", "IMAGE"]
+            }
+        }
+
+        headers = {"Content-Type": "application/json"}
+
+        try:
+            async with httpx.AsyncClient(timeout=180, follow_redirects=True) as client:
+                resp = await client.post(url, json=body, headers=headers)
+
+                if resp.status_code != 200:
+                    return f"Error: Gemini API returned {resp.status_code}: {resp.text[:500]}"
+
+                data = resp.json()
+
+                if self.stats:
+                    self.stats.add_image()
+
+                img_bytes = None
+
+                candidates = data.get("candidates", [])
+                for candidate in candidates:
+                    content = candidate.get("content", {})
+                    parts = content.get("parts", [])
+                    for part in parts:
+                        inline_data = part.get("inlineData")
+                        if inline_data:
+                            b64_data = inline_data.get("data", "")
+                            if b64_data:
+                                img_bytes = base64.b64decode(b64_data)
+                                break
+                    if img_bytes:
+                        break
+
+                if not img_bytes:
+                    return f"Error: No image found in Gemini response. Response: {json.dumps(data)[:500]}"
+
+            return await self._save_image(img_bytes, filename)
+
+        except Exception as e:
+            return f"Error generating image (Gemini): {type(e).__name__}: {e}"
+
+    async def _save_image(self, img_bytes: bytes, filename: str) -> str:
+        """Save image bytes to file and send to Telegram."""
+        filepath = self._resolve_path(filename)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        with open(filepath, "wb") as f:
+            f.write(img_bytes)
+
+        try:
+            import telegram
+            telegram.send_photo_bytes(img_bytes, f"🎨 {filename}")
+        except Exception:
+            pass
+
+        return f"Image saved: {filename} ({len(img_bytes):,} bytes)"
 
     def _search_codes(self, args: dict) -> str:
         """Search code examples in .temp/codes/ knowledge base."""

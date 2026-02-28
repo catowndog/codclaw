@@ -360,18 +360,18 @@ if [[ "${DO_ENV:-true}" == "true" ]]; then
     AGENT_NAME="${INPUT_NAME:-CodClaw}"
 
     echo ""
-    echo -e "  ${DIM}API Provider:${NC}"
+    echo -e "  ${DIM}LLM Provider (text generation):${NC}"
     echo -e "    ${WHITE}1${NC}) Anthropic (Claude)"
     echo -e "    ${WHITE}2${NC}) OpenAI"
     ask "Choose [1]: "
     read -r INPUT_PROVIDER
     case "$INPUT_PROVIDER" in
-        2) API_PROVIDER="openai" ;;
-        *) API_PROVIDER="anthropic" ;;
+        2) LLM_API_PROVIDER="openai" ;;
+        *) LLM_API_PROVIDER="anthropic" ;;
     esac
 
     echo ""
-    if [[ "$API_PROVIDER" == "anthropic" ]]; then
+    if [[ "$LLM_API_PROVIDER" == "anthropic" ]]; then
         ask "Anthropic API Key: "
         read -r API_KEY
         API_BASE_URL="https://api.anthropic.com"
@@ -392,6 +392,49 @@ if [[ "${DO_ENV:-true}" == "true" ]]; then
         read -r INPUT_MODEL
         API_MODEL="${INPUT_MODEL:-gpt-4o}"
     fi
+
+    echo ""
+    echo -e "  ${DIM}Image generation provider (optional — press Enter to skip/disable):${NC}"
+    echo -e "    ${WHITE}1${NC}) OpenAI ${DIM}(gpt-5-image via OpenAI-compatible API)${NC}"
+    echo -e "    ${WHITE}2${NC}) Gemini ${DIM}(gemini-2.0-flash-preview-image-generation)${NC}"
+    echo -e "    ${WHITE}3${NC}) None ${DIM}(disable image generation)${NC}"
+    ask "Choose [3]: "
+    read -r INPUT_IMG_PROVIDER
+    case "$INPUT_IMG_PROVIDER" in
+        1)
+            IMAGE_API_PROVIDER="openai"
+            OPENAI_IMAGE_MODEL="gpt-5-image"
+            GEMINI_API_KEY=""
+            GEMINI_IMAGE_MODEL=""
+            ask "OpenAI image model [${OPENAI_IMAGE_MODEL}]: "
+            read -r INPUT_OAI_IMG_MODEL
+            OPENAI_IMAGE_MODEL="${INPUT_OAI_IMG_MODEL:-$OPENAI_IMAGE_MODEL}"
+            ok "Image provider: OpenAI (model: ${OPENAI_IMAGE_MODEL})"
+            ;;
+        2)
+            IMAGE_API_PROVIDER="gemini"
+            OPENAI_IMAGE_MODEL=""
+            ask "Gemini API Key: "
+            read -r GEMINI_API_KEY
+            while [[ -z "$GEMINI_API_KEY" ]]; do
+                err "Gemini API Key is required when using Gemini for images!"
+                ask "Gemini API Key: "
+                read -r GEMINI_API_KEY
+            done
+            GEMINI_IMAGE_MODEL="gemini-2.0-flash-preview-image-generation"
+            ask "Gemini image model [${GEMINI_IMAGE_MODEL}]: "
+            read -r INPUT_GEMINI_MODEL
+            GEMINI_IMAGE_MODEL="${INPUT_GEMINI_MODEL:-$GEMINI_IMAGE_MODEL}"
+            ok "Image provider: Gemini (model: ${GEMINI_IMAGE_MODEL})"
+            ;;
+        *)
+            IMAGE_API_PROVIDER=""
+            OPENAI_IMAGE_MODEL=""
+            GEMINI_API_KEY=""
+            GEMINI_IMAGE_MODEL=""
+            info "Image generation disabled — agent will not generate images"
+            ;;
+    esac
 
     echo ""
     ask "Project path (absolute): "
@@ -462,18 +505,26 @@ if [[ "${DO_ENV:-true}" == "true" ]]; then
     cat > "$ENV_FILE" << ENVEOF
 AGENT_NAME=${AGENT_NAME}
 
-API_PROVIDER=${API_PROVIDER}
+# LLM provider: "anthropic" or "openai"
+LLM_API_PROVIDER=${LLM_API_PROVIDER}
+# Image generation provider: "openai", "gemini" or "" (disabled)
+IMAGE_API_PROVIDER=${IMAGE_API_PROVIDER}
 
 MODEL=claude-opus-4-6
 IMAGE_MODEL=gpt-5-image
 
-ANTHROPIC_API_KEY=${API_PROVIDER:+$( [[ "$API_PROVIDER" == "anthropic" ]] && echo "$API_KEY" || echo "" )}
-ANTHROPIC_BASE_URL=${API_PROVIDER:+$( [[ "$API_PROVIDER" == "anthropic" ]] && echo "$API_BASE_URL" || echo "https://api.anthropic.com" )}
-ANTHROPIC_MODEL=${API_PROVIDER:+$( [[ "$API_PROVIDER" == "anthropic" ]] && echo "$API_MODEL" || echo "claude-sonnet-4-20250514" )}
+# Gemini API (for image generation)
+GEMINI_API_KEY=${GEMINI_API_KEY:-}
+GEMINI_IMAGE_MODEL=${GEMINI_IMAGE_MODEL:-}
 
-OPENAI_API_KEY=${API_PROVIDER:+$( [[ "$API_PROVIDER" == "openai" ]] && echo "$API_KEY" || echo "" )}
-OPENAI_BASE_URL=${API_PROVIDER:+$( [[ "$API_PROVIDER" == "openai" ]] && echo "$API_BASE_URL" || echo "" )}
-OPENAI_MODEL=${API_PROVIDER:+$( [[ "$API_PROVIDER" == "openai" ]] && echo "$API_MODEL" || echo "" )}
+ANTHROPIC_API_KEY=${LLM_API_PROVIDER:+$( [[ "$LLM_API_PROVIDER" == "anthropic" ]] && echo "$API_KEY" || echo "" )}
+ANTHROPIC_BASE_URL=${LLM_API_PROVIDER:+$( [[ "$LLM_API_PROVIDER" == "anthropic" ]] && echo "$API_BASE_URL" || echo "https://api.anthropic.com" )}
+ANTHROPIC_MODEL=${LLM_API_PROVIDER:+$( [[ "$LLM_API_PROVIDER" == "anthropic" ]] && echo "$API_MODEL" || echo "claude-sonnet-4-20250514" )}
+
+OPENAI_API_KEY=${LLM_API_PROVIDER:+$( [[ "$LLM_API_PROVIDER" == "openai" ]] && echo "$API_KEY" || echo "" )}
+OPENAI_BASE_URL=${LLM_API_PROVIDER:+$( [[ "$LLM_API_PROVIDER" == "openai" ]] && echo "$API_BASE_URL" || echo "" )}
+OPENAI_MODEL=${LLM_API_PROVIDER:+$( [[ "$LLM_API_PROVIDER" == "openai" ]] && echo "$API_MODEL" || echo "" )}
+OPENAI_IMAGE_MODEL=${OPENAI_IMAGE_MODEL:-}
 
 SYSTEM_PROMPT=You are an autonomous agent. Follow the plan in .temp/plan.md
 

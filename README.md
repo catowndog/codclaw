@@ -31,7 +31,7 @@ A fully autonomous AI agent that executes tasks from a plan file, using shell co
 | **Token Stats**             | Cost tracking with periodic reports every 5 minutes                                                 |
 | **Upload Images**           | Place mockups in `.temp/uploads/` — agent sees them at startup                                      |
 | **Parallel Agents (x1–x4)** | Run 2, 3, or 4 LLM agents simultaneously on different tasks — no file conflicts                    |
-| **Multi-provider**          | Anthropic + OpenAI-compatible APIs with automatic format conversion                                 |
+| **Multi-provider**          | Anthropic + OpenAI LLM APIs; OpenAI + Gemini image generation (or disabled)                        |
 
 ## 🚀 Quick Start
 
@@ -47,7 +47,7 @@ The installer will:
 - Install all system dependencies (Python 3.13, Node.js 22, Chrome, Xvfb)
 - Clone the repo to `/opt/codclaw`
 - Create a virtual environment and install pip dependencies
-- Walk you through `.env` configuration (API key, project path, Telegram)
+- Walk you through `.env` configuration (LLM provider, image provider, API keys, project path, Telegram)
 - Set up a systemd service for background operation
 - Create swap if your server has < 4GB RAM
 
@@ -77,7 +77,10 @@ All settings are in `.env` (see `.env.example`):
 
 ```env
 AGENT_NAME=MyAgent
-API_PROVIDER=anthropic
+LLM_API_PROVIDER=anthropic
+
+# Image generation: "openai", "gemini", or "" (disabled)
+IMAGE_API_PROVIDER=openai
 
 ANTHROPIC_API_KEY=sk-...
 ANTHROPIC_BASE_URL=http://your-proxy:9999/anthropic
@@ -86,6 +89,11 @@ ANTHROPIC_MODEL=claude-opus-4-6
 OPENAI_API_KEY=sk-...
 OPENAI_BASE_URL=http://your-proxy:9999/v1
 OPENAI_MODEL=gpt-5.3-codex
+OPENAI_IMAGE_MODEL=gpt-5-image
+
+# Gemini (for image generation)
+GEMINI_API_KEY=AIza...
+GEMINI_IMAGE_MODEL=gemini-2.0-flash-preview-image-generation
 
 PROJECT_PATH=/path/to/project
 MAX_TOKENS=256000
@@ -98,34 +106,38 @@ TG_USER_ID=123456789
 
 DATABASE_URL=postgresql://user:pass@localhost:5432/mydb
 REFERENCE_SITES=["https://example.com"]
-IMAGE_MODEL=claude-image
+IMAGE_MODEL=gpt-5-image
 ```
 
-| Variable             | Required | Default                     | Description                                   |
-| -------------------- | -------- | --------------------------- | --------------------------------------------- |
-| `API_PROVIDER`       |          | `anthropic`                 | `anthropic` or `openai`                       |
-| `ANTHROPIC_API_KEY`  | ✅       | —                           | API key for Anthropic                         |
-| `ANTHROPIC_BASE_URL` | ✅       | `https://api.anthropic.com` | API endpoint (or proxy)                       |
-| `ANTHROPIC_MODEL`    |          | —                           | Override model for Anthropic                  |
-| `OPENAI_API_KEY`     |          | —                           | API key for OpenAI (when API_PROVIDER=openai) |
-| `OPENAI_BASE_URL`    |          | `https://api.openai.com/v1` | API endpoint for OpenAI                       |
-| `OPENAI_MODEL`       |          | —                           | Override model for OpenAI                     |
-| `PROJECT_PATH`       | ✅       | —                           | Target project directory                      |
-| `MODEL`              |          | `claude-opus-4-6`           | Default model                                 |
-| `MAX_TOKENS`         |          | `128000`                    | Max output tokens per API call                |
-| `EFFORT`             |          | `high`                      | Thinking effort: `low` `medium` `high` `max`  |
-| `THINKING_ENABLED`   |          | `true`                      | Enable/disable extended thinking              |
-| `SHOW_THINKING`      |          | `true`                      | Display thinking blocks in CLI                |
-| `DELAY`              |          | `2`                         | Seconds between iterations                    |
-| `PARALLEL_AGENTS`    |          | `1`                         | Parallel agents: `1` `2` `3` `4` (x1–x4)     |
-| `DEBUG_REQUESTS`     |          | `false`                     | Log raw SSE events                            |
-| `IMAGE_MODEL`        |          | `claude-image`              | Model for image generation                    |
-| `TG_BOT_TOKEN`       |          | disabled                    | Telegram bot token                            |
-| `TG_USER_ID`         |          | disabled                    | Telegram user ID for notifications            |
-| `DATABASE_URL`       |          | disabled                    | Database connection string                    |
-| `REFERENCE_SITES`    |          | `[]`                        | JSON array of URLs to crawl before starting   |
-| `MCP_SERVERS_CONFIG` |          | `./mcp_servers.json`        | MCP servers configuration file                |
-| `SKILLS_DIR`         |          | `./skills`                  | Skills directory                              |
+| Variable              | Required | Default                     | Description                                          |
+| --------------------- | -------- | --------------------------- | ---------------------------------------------------- |
+| `LLM_API_PROVIDER`    |          | `anthropic`                 | LLM provider: `anthropic` or `openai`                |
+| `IMAGE_API_PROVIDER`  |          | _(disabled)_                | Image provider: `openai`, `gemini`, or `""` (off)    |
+| `ANTHROPIC_API_KEY`   | ✅       | —                           | API key for Anthropic                                |
+| `ANTHROPIC_BASE_URL`  | ✅       | `https://api.anthropic.com` | API endpoint (or proxy)                              |
+| `ANTHROPIC_MODEL`     |          | —                           | Override model for Anthropic                         |
+| `OPENAI_API_KEY`      |          | —                           | API key for OpenAI (LLM or images)                   |
+| `OPENAI_BASE_URL`     |          | `https://api.openai.com/v1` | API endpoint for OpenAI                              |
+| `OPENAI_MODEL`        |          | —                           | Override model for OpenAI                            |
+| `OPENAI_IMAGE_MODEL`  |          | —                           | Override image model for OpenAI (e.g. `gpt-5-image`) |
+| `GEMINI_API_KEY`      |          | —                           | Google Gemini API key (for image generation)          |
+| `GEMINI_IMAGE_MODEL`  |          | `gemini-2.0-flash-preview-image-generation` | Gemini model for image generation    |
+| `PROJECT_PATH`        | ✅       | —                           | Target project directory                             |
+| `MODEL`               |          | `claude-opus-4-6`           | Default LLM model                                    |
+| `IMAGE_MODEL`         |          | `gpt-5-image`               | Model for OpenAI image generation                    |
+| `MAX_TOKENS`          |          | `128000`                    | Max output tokens per API call                       |
+| `EFFORT`              |          | `high`                      | Thinking effort: `low` `medium` `high` `max`         |
+| `THINKING_ENABLED`    |          | `true`                      | Enable/disable extended thinking                     |
+| `SHOW_THINKING`       |          | `true`                      | Display thinking blocks in CLI                       |
+| `DELAY`               |          | `2`                         | Seconds between iterations                           |
+| `PARALLEL_AGENTS`     |          | `1`                         | Parallel agents: `1` `2` `3` `4` (x1–x4)            |
+| `DEBUG_REQUESTS`      |          | `false`                     | Log raw SSE events                                   |
+| `TG_BOT_TOKEN`        |          | disabled                    | Telegram bot token                                   |
+| `TG_USER_ID`          |          | disabled                    | Telegram user ID for notifications                   |
+| `DATABASE_URL`        |          | disabled                    | Database connection string                           |
+| `REFERENCE_SITES`     |          | `[]`                        | JSON array of URLs to crawl before starting          |
+| `MCP_SERVERS_CONFIG`  |          | `./mcp_servers.json`        | MCP servers configuration file                       |
+| `SKILLS_DIR`          |          | `./skills`                  | Skills directory                                     |
 
 ### EFFORT Levels (Thinking Budget)
 
@@ -219,7 +231,7 @@ print(examples)
 
 ## 🎨 Image Generation
 
-The agent can generate images when needed:
+The agent can generate images when needed (if `IMAGE_API_PROVIDER` is configured):
 
 ```starlark
 generate_image(
@@ -229,7 +241,17 @@ generate_image(
 )
 ```
 
-- Uses the proxy API with `IMAGE_MODEL` (default: `claude-image`)
+### Supported Providers
+
+| Provider | `IMAGE_API_PROVIDER` | Required Variables                        | Default Model                           |
+| -------- | -------------------- | ----------------------------------------- | --------------------------------------- |
+| OpenAI   | `openai`             | `OPENAI_API_KEY`, `OPENAI_BASE_URL`       | `gpt-5-image` (`IMAGE_MODEL`)          |
+| Gemini   | `gemini`             | `GEMINI_API_KEY`                          | `gemini-2.0-flash-preview-image-generation` (`GEMINI_IMAGE_MODEL`) |
+| Disabled | _(empty)_            | —                                         | —                                       |
+
+- Set `IMAGE_API_PROVIDER=` (empty) to disable image generation — the agent will skip `generate_image` calls
+- **OpenAI** — uses `OPENAI_BASE_URL` + chat completions endpoint with `IMAGE_MODEL`
+- **Gemini** — uses Google Generative AI API directly with `GEMINI_API_KEY`
 - Saves directly to `PROJECT_PATH`
 - Auto-sends to Telegram as photo
 - Sizes: `1024x1024`, `1792x1024`, `1024x1792`
