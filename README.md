@@ -32,8 +32,34 @@ A fully autonomous AI agent that executes tasks from a plan file, using shell co
 
 ## 🚀 Quick Start
 
+### Auto-install (Ubuntu 22.04 / 24.04)
+
 ```bash
-git clone <repo-url> && cd CLI
+wget -qO install.sh https://raw.githubusercontent.com/catowndog/codclaw/main/install.sh
+sudo bash install.sh
+```
+
+The installer will:
+- Install all system dependencies (Python 3.13, Node.js 22, Chrome, Xvfb)
+- Clone the repo to `/opt/codclaw`
+- Create a virtual environment and install pip dependencies
+- Walk you through `.env` configuration (API key, project path, Telegram)
+- Set up a systemd service for background operation
+- Create swap if your server has < 4GB RAM
+
+```bash
+sudo systemctl start codclaw    # start
+sudo journalctl -u codclaw -f   # logs
+sudo systemctl stop codclaw     # stop
+sudo bash /opt/codclaw/install.sh --uninstall  # remove
+```
+
+> For detailed manual setup see [SERVER_INSTALL_GUIDE.md](SERVER_INSTALL_GUIDE.md)
+
+### Manual install (macOS / Linux)
+
+```bash
+git clone https://github.com/catowndog/codclaw.git && cd codclaw
 pip install -r requirements.txt
 cp .env.example .env  # Edit with your settings
 mkdir -p /path/to/project/.temp
