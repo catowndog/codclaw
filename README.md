@@ -3,6 +3,8 @@
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+<a href="#-support-the-project"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-☕-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy me a coffee" /></a>
+
 A fully autonomous AI agent that executes tasks from a plan file, using shell commands, database queries, web search, MCP browser tools, image generation, code knowledge base, and more — with Telegram notifications.
 
 ## ✨ Features
@@ -40,6 +42,7 @@ sudo bash install.sh
 ```
 
 The installer will:
+
 - Install all system dependencies (Python 3.13, Node.js 22, Chrome, Xvfb)
 - Clone the repo to `/opt/codclaw`
 - Create a virtual environment and install pip dependencies
@@ -371,6 +374,24 @@ PROJECT_PATH/.temp/       # Agent working directory
 | MongoDB    | `mongodb://user:pass@host:27017/db`   |
 
 MongoDB uses JSON queries: `{"collection":"users","action":"find","filter":{}}`
+
+## ☕ Support the Project
+
+If CodClaw saved you time or you just think it's cool — consider buying me a coffee. It helps keep the project alive and motivates me to add new features.
+
+<a href="https://buymeacoffee.com/catowndog">
+  <img src="https://img.buymeacoffee.com/button-api/?text=Buy me a coffee&emoji=☕&slug=catowndog&button_colour=FFDD00&font_colour=000000&font_family=Poppins&outline_colour=000000&coffee_colour=ffffff" alt="Buy me a coffee" />
+</a>
+
+**Support via crypto:**
+
+| Currency      | Address                                            |
+| ------------- | -------------------------------------------------- |
+| USDT (TRC-20) | `TRQj3Z7o6ygdvMGKFEm7Jzfu1LjJwX4yRp`               |
+| TRON          | `TRQj3Z7o6ygdvMGKFEm7Jzfu1LjJwX4yRp`               |
+| BTC           | `bc1qu7v6nn9safflc5naqk9wmdum2u76jjthupl7zn`       |
+| TON           | `UQAuI-0Wh4Wwa7FNqrY9cxFvHoZ-UjxwFrHzFczTVOZsmhw6` |
+| ETH           | `0x605a8e6fC6F470C645FAe541ca6Ffd95877610CD`       |
 
 ## 📄 License
 
