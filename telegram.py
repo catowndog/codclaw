@@ -31,14 +31,10 @@ def md_to_tg(text: str) -> str:
     """
     import re
 
-    # First escape HTML in the raw text
     text = esc(text)
 
-    # Code blocks: ```...``` (with optional language tag)
-    # Handle both closed and unclosed blocks
     def _replace_code_block(m):
         code = m.group(1).strip()
-        # Remove optional language identifier on first line
         lines = code.split("\n")
         if lines and re.match(r'^[a-zA-Z_]+$', lines[0].strip()):
             code = "\n".join(lines[1:]).strip()
@@ -46,9 +42,7 @@ def md_to_tg(text: str) -> str:
             return ""
         return f"<pre>{code}</pre>"
 
-    # Closed code blocks
     text = re.sub(r'```[a-zA-Z_]*\n(.*?)```', _replace_code_block, text, flags=re.DOTALL)
-    # Unclosed code block at end of text
     m = re.search(r'```[a-zA-Z_]*\n(.+)$', text, flags=re.DOTALL)
     if m:
         code = m.group(1).strip()
@@ -58,13 +52,10 @@ def md_to_tg(text: str) -> str:
         if code:
             text = text[:m.start()] + f"<pre>{code}</pre>"
 
-    # Bold: **text**
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
 
-    # Inline code: `text`
     text = re.sub(r'`([^`]+?)`', r'<i>\1</i>', text)
 
-    # Headings: lines starting with # → bold
     lines = text.split("\n")
     result = []
     for line in lines:
@@ -77,7 +68,6 @@ def md_to_tg(text: str) -> str:
         result.append(line)
     text = "\n".join(result)
 
-    # Clean up excessive newlines
     text = re.sub(r'\n{3,}', '\n\n', text)
 
     return text.strip()

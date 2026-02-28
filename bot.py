@@ -854,17 +854,19 @@ End with a DETAILED summary of what you did (files changed, what was built, test
 def parse_pending_tasks() -> list[str]:
     """Parse .temp/tasks.md and return list of uncompleted task descriptions.
 
-    Extracts all lines matching `- [ ] ...` pattern.
-    Returns list of task description strings (without the `- [ ] ` prefix).
+    Matches various checkbox formats: - [ ] , - [] , * [ ] , * []
+    Returns list of task description strings.
     """
+    import re as _re
     tasks_content = read_tasks_file()
     if not tasks_content:
         return []
     tasks = []
     for line in tasks_content.split("\n"):
         stripped = line.strip()
-        if stripped.startswith("- [ ] "):
-            task_text = stripped[6:].strip()
+        m = _re.match(r'^[-*]\s*\[[ ]?\]\s+(.+)', stripped)
+        if m:
+            task_text = m.group(1).strip()
             if task_text:
                 tasks.append(task_text)
     return tasks
@@ -1196,6 +1198,7 @@ async def run_agent():
 
     if config.PARALLEL_AGENTS > 1:
         display.show_info(f"Parallel mode: [bold cyan]x{config.PARALLEL_AGENTS}[/bold cyan] ({config.PARALLEL_AGENTS} agents)")
+        display.show_info("[dim]Parallel activates from iteration 2 when tasks.md has 2+ pending \\[ ] tasks[/dim]")
 
     _setup_terminal()
     _start_stdin_thread()
@@ -1287,7 +1290,11 @@ async def run_agent():
                 pending_tasks = parse_pending_tasks()
                 n_agents = min(config.PARALLEL_AGENTS, len(pending_tasks))
                 if n_agents < 2:
-                    use_parallel = False 
+                    use_parallel = False
+                    if not pending_tasks:
+                        display.show_info(f"⚡ x{config.PARALLEL_AGENTS} ready but no pending [ ] tasks in tasks.md — running x1")
+                    else:
+                        display.show_info(f"⚡ x{config.PARALLEL_AGENTS} ready but only {len(pending_tasks)} task — need 2+ for parallel, running x1")
 
             if use_parallel:
                 display.show_parallel_iteration_header(iteration, n_agents)
