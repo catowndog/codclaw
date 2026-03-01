@@ -1341,70 +1341,87 @@ class LLMAgent:
         old_messages = self.messages[:-keep]
         recent_messages = self.messages[-keep:]
 
-        old_text_parts = []
+        summary_lines = []
+        files_modified = set()
+        commands_run = []
+        tools_used = set()
+        errors = []
+        decisions = []
+
         for msg in old_messages:
             role = msg.get("role", "?")
             content = msg.get("content", "")
-            if isinstance(content, str):
-                text = content
-            elif isinstance(content, list):
-                bits = []
+
+            if isinstance(content, list):
                 for block in content:
-                    if isinstance(block, dict):
-                        bt = block.get("type", "")
-                        if bt == "text":
-                            bits.append(block.get("text", ""))
-                        elif bt == "tool_use":
-                            bits.append(f"[Tool: {block.get('name', '?')}]")
-                        elif bt == "tool_result":
-                            bits.append(f"[Result: {str(block.get('content', ''))[:300]}]")
-                text = "\n".join(bits)
-            else:
-                text = str(content)
-            if text.strip():
-                old_text_parts.append(f"[{role}]: {text[:2000]}")
+                    if not isinstance(block, dict):
+                        continue
+                    bt = block.get("type", "")
+                    if bt == "tool_use":
+                        tool_name = block.get("name", "?")
+                        tools_used.add(tool_name)
+                        inp = block.get("input", {})
+                        if isinstance(inp, dict):
+                            for key in ("file_path", "path", "filename"):
+                                if key in inp:
+                                    files_modified.add(str(inp[key]))
+                            if tool_name in ("execute_command", "run_command", "bash") and "command" in inp:
+                                cmd = str(inp["command"])[:120]
+                                commands_run.append(cmd)
+                    elif bt == "tool_result":
+                        res = str(block.get("content", ""))
+                        if "error" in res.lower()[:100] or "failed" in res.lower()[:100]:
+                            errors.append(res[:150])
+                    elif bt == "text":
+                        text = block.get("text", "")
+                        if role == "assistant" and len(text) > 20:
+                            first_line = text.strip().split("\n")[0][:200]
+                            if first_line and not first_line.startswith(("[CONTEXT SUMMARY", "Understood")):
+                                decisions.append(first_line)
+            elif isinstance(content, str) and content.strip():
+                if role == "user" and len(content) > 10:
+                    first_line = content.strip().split("\n")[0][:200]
+                    if first_line.startswith("[CONTEXT SUMMARY"):
+                        summary_lines.append(content[:2000])
+                    else:
+                        summary_lines.append(f"User request: {first_line}")
+                elif role == "assistant" and len(content) > 20:
+                    first_line = content.strip().split("\n")[0][:200]
+                    if not first_line.startswith("Understood"):
+                        decisions.append(first_line)
 
-        old_conversation = "\n\n".join(old_text_parts)
-        _max_old = min(100_000, self._get_context_window() * 3)
-        if len(old_conversation) > _max_old:
-            old_conversation = old_conversation[:_max_old] + "\n\n... (truncated)"
+        parts = []
+        if summary_lines:
+            parts.append("Previous context:\n" + "\n".join(summary_lines[-5:]))
+        if files_modified:
+            flist = sorted(files_modified)
+            if len(flist) > 30:
+                flist = flist[:30] + [f"... +{len(flist) - 30} more"]
+            parts.append("Files touched: " + ", ".join(flist))
+        if tools_used:
+            parts.append("Tools used: " + ", ".join(sorted(tools_used)))
+        if commands_run:
+            cmds = commands_run[-10:]
+            parts.append("Commands run:\n" + "\n".join(f"  $ {c}" for c in cmds))
+        if errors:
+            parts.append("Errors encountered:\n" + "\n".join(f"  - {e}" for e in errors[-5:]))
+        if decisions:
+            parts.append("Key actions:\n" + "\n".join(f"  - {d}" for d in decisions[-10:]))
 
-        try:
-            _compress_max = min(config.MAX_TOKENS, self._get_context_window() // 2, 128_000)
-            summary_resp = await self._call_api_simple(
-                system=(
-                    "You are a conversation summarizer. Preserve ALL important details: "
-                    "tasks completed, files modified, commands run, decisions made, errors, "
-                    "current state, what was planned next. Use bullet points."
-                ),
-                messages=[{"role": "user", "content": f"Summarize:\n\n{old_conversation}"}],
-                max_tokens=_compress_max,
-            )
+        summary_text = "\n\n".join(parts) if parts else "Previous work completed (details pruned)."
 
-            summary_text = ""
-            for block in summary_resp.get("content", []):
-                if block.get("type") == "text":
-                    summary_text += block.get("text", "")
+        _max_summary_chars = self._get_context_window() 
+        if len(summary_text) > _max_summary_chars:
+            summary_text = summary_text[:_max_summary_chars] + "\n\n... (summary trimmed)"
 
-            if not summary_text:
-                display.show_warning("Compression failed — empty summary")
-                return
+        compressed_count = len(old_messages)
+        self.messages = [
+            {"role": "user", "content": f"[CONTEXT SUMMARY — {compressed_count} messages]\n\n{summary_text}\n\n[END SUMMARY]"},
+            {"role": "assistant", "content": [{"type": "text", "text": "Understood. Continuing work."}]},
+        ] + recent_messages
 
-            if self.stats:
-                u = summary_resp.get("usage", {})
-                self.stats.add(u.get("input_tokens", 0), u.get("output_tokens", 0))
-
-            compressed_count = len(old_messages)
-            self.messages = [
-                {"role": "user", "content": f"[CONTEXT SUMMARY — {compressed_count} messages]\n\n{summary_text}\n\n[END SUMMARY]"},
-                {"role": "assistant", "content": [{"type": "text", "text": "Understood. Continuing work."}]},
-            ] + recent_messages
-
-            new_tokens = self._estimate_tokens()
-            display.show_info(f"Compressed: {compressed_count} msgs → summary. ~{estimated_tokens:,} → ~{new_tokens:,} tokens")
-
-        except Exception as e:
-            display.show_error(f"Context compression failed: {e}")
+        new_tokens = self._estimate_tokens()
+        display.show_info(f"Compressed: {compressed_count} msgs → summary. ~{estimated_tokens:,} → ~{new_tokens:,} tokens")
 
 
     def reset_history(self):
