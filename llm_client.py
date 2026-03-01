@@ -655,6 +655,8 @@ class LLMAgent:
         """Make an async streaming Anthropic API call."""
         safe_max_tokens = self._calc_safe_max_tokens(system, tools)
 
+        self.messages = self._fix_orphaned_tool_pairs(self.messages)
+
         body: dict[str, Any] = {
             "model": config.get_model(),
             "max_tokens": safe_max_tokens,
@@ -1415,6 +1417,9 @@ class LLMAgent:
             summary_text = summary_text[:_max_summary_chars] + "\n\n... (summary trimmed)"
 
         compressed_count = len(old_messages)
+
+        recent_messages = self._fix_orphaned_tool_pairs(recent_messages)
+
         self.messages = [
             {"role": "user", "content": f"[CONTEXT SUMMARY — {compressed_count} messages]\n\n{summary_text}\n\n[END SUMMARY]"},
             {"role": "assistant", "content": [{"type": "text", "text": "Understood. Continuing work."}]},
@@ -1422,6 +1427,96 @@ class LLMAgent:
 
         new_tokens = self._estimate_tokens()
         display.show_info(f"Compressed: {compressed_count} msgs → summary. ~{estimated_tokens:,} → ~{new_tokens:,} tokens")
+
+    @staticmethod
+    def _fix_orphaned_tool_pairs(messages: list[dict]) -> list[dict]:
+        """Fix orphaned tool_use/tool_result blocks after compression.
+
+        Anthropic API rules:
+        1. Each tool_result in a user message MUST reference a tool_use from the
+           immediately preceding assistant message.
+        2. Each tool_use in an assistant message MUST have a matching tool_result
+           in the immediately following user message.
+        3. Messages must alternate: user, assistant, user, assistant...
+        """
+        if not messages:
+            return messages
+
+        cleaned = []
+        i = 0
+        while i < len(messages):
+            msg = messages[i]
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+
+            if role == "user" and isinstance(content, list):
+                prev_tool_use_ids = set()
+                if cleaned and cleaned[-1].get("role") == "assistant":
+                    prev_content = cleaned[-1].get("content", "")
+                    if isinstance(prev_content, list):
+                        for block in prev_content:
+                            if isinstance(block, dict) and block.get("type") == "tool_use":
+                                prev_tool_use_ids.add(block.get("id", ""))
+
+                new_blocks = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        if block.get("tool_use_id", "") not in prev_tool_use_ids:
+                            continue  
+                    new_blocks.append(block)
+
+                if new_blocks:
+                    cleaned.append({**msg, "content": new_blocks})
+                else:
+                    cleaned.append({**msg, "content": "(previous tool results compressed)"})
+                i += 1
+                continue
+
+            if role == "assistant" and isinstance(content, list):
+                next_tool_result_ids = set()
+                if i + 1 < len(messages):
+                    next_msg = messages[i + 1]
+                    next_content = next_msg.get("content", "")
+                    if next_msg.get("role") == "user" and isinstance(next_content, list):
+                        for block in next_content:
+                            if isinstance(block, dict) and block.get("type") == "tool_result":
+                                next_tool_result_ids.add(block.get("tool_use_id", ""))
+
+                new_blocks = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        if block.get("id", "") not in next_tool_result_ids:
+                            continue 
+                    new_blocks.append(block)
+
+                if new_blocks:
+                    cleaned.append({**msg, "content": new_blocks})
+                else:
+                    cleaned.append({**msg, "content": [{"type": "text", "text": "(continued)"}]})
+                i += 1
+                continue
+
+            cleaned.append(msg)
+            i += 1
+
+        if len(cleaned) >= 2:
+            final = [cleaned[0]]
+            for j in range(1, len(cleaned)):
+                if cleaned[j].get("role") == final[-1].get("role"):
+                    prev_c = final[-1].get("content", "")
+                    curr_c = cleaned[j].get("content", "")
+                    if isinstance(prev_c, str) and isinstance(curr_c, str):
+                        final[-1] = {**cleaned[j], "content": prev_c + "\n" + curr_c}
+                    else:
+                        final[-1] = cleaned[j]
+                else:
+                    final.append(cleaned[j])
+            cleaned = final
+
+        if cleaned and cleaned[0].get("role") == "assistant":
+            cleaned.insert(0, {"role": "user", "content": "(context resumed)"})
+
+        return cleaned
 
 
     def reset_history(self):
@@ -1459,6 +1554,7 @@ class LLMAgent:
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 self.messages = json.load(f)
+            self.messages = self._fix_orphaned_tool_pairs(self.messages)
             return True
         except Exception:
             return False
