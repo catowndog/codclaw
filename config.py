@@ -38,6 +38,7 @@ def get_model() -> str:
         return ANTHROPIC_MODEL
     return MODEL
 MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "128000"))
+CONTEXT_WINDOW: int = int(os.getenv("CONTEXT_WINDOW", "0")) 
 SYSTEM_PROMPT: str = os.getenv(
     "SYSTEM_PROMPT",
     "You are a fully autonomous universal AI agent. You execute tasks from .temp/plan.md using all available tools without human intervention.",

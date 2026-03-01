@@ -302,6 +302,65 @@ BUILTIN_TOOLS = [
             "required": ["path"],
         },
     },
+    {
+        "name": "rag_search",
+        "description": (
+            "Search across ALL project files, skills, and code examples. "
+            "Searches .temp/ (plan, tasks, notes, errors), skills/*.md, and .temp/codes/. "
+            "Returns matching file paths with relevant snippets. "
+            "Use this to find context before coding or to locate specific information."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query — keywords or regex pattern",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum results to return (default: 5)",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "save_memory",
+        "description": (
+            "Save a persistent instruction/note to agent memory (.temp/memory.md). "
+            "Memory survives restarts and is loaded into EVERY iteration. "
+            "Use when the operator says 'запомни', 'remember', 'сохрани в памяти', 'save to memory'. "
+            "Each call appends one entry. Use send_message() to confirm to the operator."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The instruction or note to remember permanently",
+                },
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "delete_memory",
+        "description": (
+            "Delete a specific memory entry by its line number from .temp/memory.md. "
+            "Use list_directory or read_file on .temp/memory.md to see entries with numbers first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "index": {
+                    "type": "integer",
+                    "description": "1-based line number of the memory entry to delete",
+                },
+            },
+            "required": ["index"],
+        },
+    },
 ]
 
 _BUILTIN_TOOL_NAMES = {t["name"] for t in BUILTIN_TOOLS}
@@ -346,6 +405,12 @@ class BuiltinTools:
                 return self._search_codes(tool_args)
             elif tool_name == "read_code":
                 return self._read_code(tool_args)
+            elif tool_name == "rag_search":
+                return self._rag_search(tool_args)
+            elif tool_name == "save_memory":
+                return self._save_memory(tool_args)
+            elif tool_name == "delete_memory":
+                return self._delete_memory(tool_args)
             else:
                 return f"Unknown built-in tool: {tool_name}"
         except Exception as e:
@@ -1186,3 +1251,141 @@ class BuiltinTools:
             return content
         except Exception as e:
             return f"Error reading code file: {e}"
+
+    def _rag_search(self, args: dict) -> str:
+        """Search across .temp/, skills/, and .temp/codes/ for relevant content."""
+        query = args.get("query", "").strip()
+        if not query:
+            return "Error: 'query' is required"
+
+        max_results = args.get("max_results", 5)
+
+        import config as cfg
+
+        search_dirs = []
+        temp_dir = Path(cfg.TEMP_DIR)
+        skills_dir = Path(cfg.SKILLS_DIR)
+        codes_dir = Path(cfg.CODES_DIR)
+
+        if temp_dir.exists():
+            search_dirs.append(("project", temp_dir))
+        if skills_dir.exists():
+            search_dirs.append(("skills", skills_dir))
+        if codes_dir.exists():
+            search_dirs.append(("codes", codes_dir))
+
+        try:
+            regex = re.compile(query, re.IGNORECASE)
+        except re.error:
+            regex = re.compile(re.escape(query), re.IGNORECASE)
+
+        skip = {".git", "node_modules", "__pycache__", ".venv", "venv",
+                "conversation.json", "conversation_full.json"}
+        results = []
+
+        for source, base_dir in search_dirs:
+            for filepath in sorted(base_dir.rglob("*")):
+                if not filepath.is_file():
+                    continue
+                if filepath.name in skip or any(p in filepath.parts for p in {".git", "__pycache__"}):
+                    continue
+                if filepath.suffix.lower() in {".json", ".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+                    continue
+
+                rel = filepath.relative_to(base_dir)
+                try:
+                    with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read(50_000)  
+                except Exception:
+                    continue
+
+                matches = regex.findall(content)
+                name_matches = regex.findall(str(rel))
+                score = len(matches) + len(name_matches) * 3
+
+                if score > 0:
+                    m = regex.search(content)
+                    snippet = ""
+                    if m:
+                        start = max(0, m.start() - 80)
+                        end = min(len(content), m.end() + 120)
+                        snippet = content[start:end].strip().replace("\n", " ")
+                        if start > 0:
+                            snippet = "..." + snippet
+                        if end < len(content):
+                            snippet = snippet + "..."
+
+                    results.append((score, source, str(rel), snippet))
+
+                if len(results) > max_results * 3:
+                    break
+
+        if not results:
+            return f"No matches found for '{query}'"
+
+        results.sort(key=lambda x: x[0], reverse=True)
+        results = results[:max_results]
+
+        output_lines = [f"Found {len(results)} result(s) for '{query}':\n"]
+        for score, source, rel, snippet in results:
+            output_lines.append(f"📄 [{source}] {rel} (score: {score})")
+            if snippet:
+                output_lines.append(f"   {snippet[:200]}")
+            output_lines.append("")
+
+        return "\n".join(output_lines)
+
+    def _save_memory(self, args: dict) -> str:
+        """Save a persistent instruction to .temp/memory.md."""
+        text = args.get("text", "").strip()
+        if not text:
+            return "Error: 'text' is required"
+
+        import config as cfg
+        memory_path = os.path.join(cfg.TEMP_DIR, "memory.md")
+        os.makedirs(cfg.TEMP_DIR, exist_ok=True)
+
+        try:
+            existing = []
+            if os.path.exists(memory_path):
+                with open(memory_path, "r", encoding="utf-8") as f:
+                    existing = [line.strip() for line in f.readlines() if line.strip()]
+
+            with open(memory_path, "a", encoding="utf-8") as f:
+                f.write(f"- {text}\n")
+
+            entry_num = len(existing) + 1
+            return f"✅ Memory saved (entry #{entry_num}): {text}"
+        except Exception as e:
+            return f"Error saving memory: {e}"
+
+    def _delete_memory(self, args: dict) -> str:
+        """Delete a memory entry by 1-based line number."""
+        index = args.get("index", 0)
+        if not index or index < 1:
+            return "Error: 'index' must be a positive integer (1-based)"
+
+        import config as cfg
+        memory_path = os.path.join(cfg.TEMP_DIR, "memory.md")
+
+        if not os.path.exists(memory_path):
+            return "Error: no memory file found (.temp/memory.md does not exist)"
+
+        try:
+            with open(memory_path, "r", encoding="utf-8") as f:
+                lines = [line for line in f.readlines() if line.strip()]
+
+            if index > len(lines):
+                return f"Error: index {index} is out of range (only {len(lines)} entries)"
+
+            deleted = lines.pop(index - 1).strip()
+
+            with open(memory_path, "w", encoding="utf-8") as f:
+                for line in lines:
+                    if not line.endswith("\n"):
+                        line += "\n"
+                    f.write(line)
+
+            return f"✅ Memory entry #{index} deleted: {deleted}"
+        except Exception as e:
+            return f"Error deleting memory: {e}"

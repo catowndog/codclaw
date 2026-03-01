@@ -639,14 +639,14 @@ class LLMAgent:
         """Calculate safe max_tokens that fits within the model's context window.
 
         Estimates input size (messages + system + tools) and caps output tokens
-        so total doesn't exceed context_window.
+        so total doesn't exceed context_window. Adapts to small contexts (12K+).
         """
         context_window = self._get_context_window()
         input_estimate = self._estimate_tokens()
         input_estimate += len(system) // 3
         if tools:
             input_estimate += len(json.dumps(tools)) // 3
-        MIN_OUTPUT_TOKENS = 64_000
+        MIN_OUTPUT_TOKENS = max(1024, context_window // 2)
         available = context_window - input_estimate - 2000
         safe = min(config.MAX_TOKENS, max(available, MIN_OUTPUT_TOKENS))
         return safe
@@ -664,14 +664,16 @@ class LLMAgent:
         }
 
         if config.THINKING_ENABLED and config.EFFORT != "low":
-            if config.EFFORT == "medium":
-                budget = min(16384, safe_max_tokens - 8192)
-            elif config.EFFORT == "high":
-                budget = min(safe_max_tokens // 2, safe_max_tokens - 8192)
-            else:  
-                budget = safe_max_tokens - 8192
-            budget = max(budget, 4096)
-            body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            if safe_max_tokens >= 8192:
+                min_reserve = 4096 if safe_max_tokens >= 32_000 else 2048
+                if config.EFFORT == "medium":
+                    budget = min(16384, safe_max_tokens - min_reserve)
+                elif config.EFFORT == "high":
+                    budget = min(safe_max_tokens // 2, safe_max_tokens - min_reserve)
+                else:
+                    budget = safe_max_tokens - min_reserve
+                budget = max(budget, 1024)
+                body["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
         if tools:
             body["tools"] = tools
@@ -695,12 +697,15 @@ class LLMAgent:
                             if m:
                                 real_input = int(m.group(2)) + int(m.group(3))
                                 context_window = self._get_context_window()
-                                new_max = max(context_window - real_input - 5000, 16_000)
+                                new_max = max(context_window - real_input - 2000, 1024)
                                 display.show_warning(f"Context overflow — real input: {real_input:,}, reducing max_tokens: {body['max_tokens']:,} → {new_max:,}")
                                 body["max_tokens"] = new_max
                                 if "thinking" in body:
-                                    budget = max(new_max - 8192, 4096)
-                                    body["thinking"]["budget_tokens"] = budget
+                                    if new_max < 8192:
+                                        del body["thinking"]
+                                    else:
+                                        budget = max(new_max - 4096, 1024)
+                                        body["thinking"]["budget_tokens"] = budget
                                 continue 
                         display.show_error(
                             f"HTTP {response.status_code} from {url}\n"
@@ -837,7 +842,6 @@ class LLMAgent:
             for attempt in range(1, max_retries + 1):
                 try:
                     result = await self.mcp.call_tool(tool_name, tool_args)
-                    # Grab binary data immediately (before another agent overwrites it)
                     self._last_mcp_binary = getattr(self.mcp, '_last_binary_data', None)
                     if getattr(self, '_check_pause', None):
                         await self._check_pause()
@@ -1049,12 +1053,12 @@ class LLMAgent:
         self._check_pause = check_pause
         self._logged_max_tokens = False
 
-        # Anti-repetition tracking
         _recent_action_hashes: list[str] = []
         _MAX_REPEAT_COUNT = 3
         _empty_tool_retries = 0
         _thinking_only_retries = 0
         _max_tokens_continues = 0
+        self._last_turn_repeated = False
 
         executor = StarlarkExecutor(
             self._execute_tool,
@@ -1082,7 +1086,8 @@ class LLMAgent:
                     _tg.send(f"⚙️ {msg}")
                 except Exception:
                     pass
-            if safe < 64_000 and len(self.messages) > KEEP_RECENT_MESSAGES + 2:
+            _min_safe = max(4096, self._get_context_window() // 4)
+            if safe < _min_safe and len(self.messages) > self._get_keep_recent() + 2:
                 display.show_warning(f"Input too large — safe_max_tokens={safe:,}, forcing compression...")
                 await self._compress_history(system)
 
@@ -1155,31 +1160,34 @@ class LLMAgent:
                 display.show_warning(f"LLM wrote {len(starlark_blocks)} starlark blocks — truncating to {MAX_BLOCKS} (tell LLM to use ONE block)")
                 starlark_blocks = starlark_blocks[:MAX_BLOCKS]
 
-            # --- Anti-repetition: fingerprint this action ---
             if starlark_blocks:
                 action_fingerprint = hashlib.md5("".join(starlark_blocks).strip().encode()).hexdigest()
             elif result["tool_calls"]:
                 tc_sig = "|".join(f"{tc['name']}:{json.dumps(tc['input'], sort_keys=True)}" for tc in result["tool_calls"])
                 action_fingerprint = hashlib.md5(tc_sig.encode()).hexdigest()
             else:
-                action_fingerprint = None
+                _text_fp = "\n".join(result["text_parts"]).strip().lower()[:500]
+                action_fingerprint = hashlib.md5(_text_fp.encode()).hexdigest() if _text_fp else None
 
             if action_fingerprint:
                 _recent_action_hashes.append(action_fingerprint)
-                # Check if last N actions are all identical
+                if len(_recent_action_hashes) > 10:
+                    _recent_action_hashes.pop(0)
                 if len(_recent_action_hashes) >= _MAX_REPEAT_COUNT:
                     last_n = _recent_action_hashes[-_MAX_REPEAT_COUNT:]
                     if len(set(last_n)) == 1:
                         display.show_warning(
                             f"🔁 Repetition detected: same action repeated {_MAX_REPEAT_COUNT}x in a row — breaking loop"
                         )
+                        self._last_turn_repeated = True
                         self.messages.append({"role": "user", "content": (
                             "⚠️ REPETITION DETECTED: You have been performing the EXACT SAME action "
                             f"{_MAX_REPEAT_COUNT} times in a row. You are stuck in a loop. "
                             "STOP repeating this action. Either:\n"
                             "1. Try a completely DIFFERENT approach to solve the problem\n"
                             "2. Skip this task and move to the next one in tasks.md\n"
-                            "3. If something is failing, diagnose the root cause instead of retrying blindly"
+                            "3. If something is failing, diagnose the root cause instead of retrying blindly\n"
+                            "4. If ALL tasks are done, report completion via send_message() and WAIT"
                         )})
                         break
 
@@ -1283,27 +1291,42 @@ class LLMAgent:
         return total_chars // 3
 
     def _get_context_window(self) -> int:
+        if config.CONTEXT_WINDOW > 0:
+            return config.CONTEXT_WINDOW
         for key, window in MODEL_CONTEXT_WINDOWS.items():
             if key in config.get_model():
                 return window
         return DEFAULT_CONTEXT_WINDOW
 
+    def _get_keep_recent(self) -> int:
+        """Dynamic KEEP_RECENT_MESSAGES based on context window size."""
+        cw = self._get_context_window()
+        if cw <= 16_000:
+            return 4
+        if cw <= 32_000:
+            return 6
+        if cw <= 64_000:
+            return 8
+        return 10
+
     def _should_compress(self) -> bool:
-        if len(self.messages) <= KEEP_RECENT_MESSAGES + 2:
+        keep = self._get_keep_recent()
+        if len(self.messages) <= keep + 2:
             return False
         estimated = self._estimate_tokens()
         threshold = int(self._get_context_window() * COMPRESSION_THRESHOLD)
         return estimated > threshold
 
     async def _compress_history(self, system: str):
-        if len(self.messages) <= KEEP_RECENT_MESSAGES + 2:
+        keep = self._get_keep_recent()
+        if len(self.messages) <= keep + 2:
             return
 
         estimated_tokens = self._estimate_tokens()
         display.show_warning(
             f"Context compression triggered — "
             f"~{estimated_tokens:,} tokens estimated, "
-            f"compressing {len(self.messages) - KEEP_RECENT_MESSAGES} old messages..."
+            f"compressing {len(self.messages) - keep} old messages..."
         )
 
         _suffix = f"_{self.agent_id + 1}" if self.agent_id > 0 else ""
@@ -1315,8 +1338,8 @@ class LLMAgent:
         except Exception as e:
             display.show_warning(f"Failed to backup history: {e}")
 
-        old_messages = self.messages[:-KEEP_RECENT_MESSAGES]
-        recent_messages = self.messages[-KEEP_RECENT_MESSAGES:]
+        old_messages = self.messages[:-keep]
+        recent_messages = self.messages[-keep:]
 
         old_text_parts = []
         for msg in old_messages:
@@ -1342,10 +1365,12 @@ class LLMAgent:
                 old_text_parts.append(f"[{role}]: {text[:2000]}")
 
         old_conversation = "\n\n".join(old_text_parts)
-        if len(old_conversation) > 100_000:
-            old_conversation = old_conversation[:100_000] + "\n\n... (truncated)"
+        _max_old = min(100_000, self._get_context_window() * 3)
+        if len(old_conversation) > _max_old:
+            old_conversation = old_conversation[:_max_old] + "\n\n... (truncated)"
 
         try:
+            _compress_max = min(config.MAX_TOKENS, self._get_context_window() // 2, 128_000)
             summary_resp = await self._call_api_simple(
                 system=(
                     "You are a conversation summarizer. Preserve ALL important details: "
@@ -1353,7 +1378,7 @@ class LLMAgent:
                     "current state, what was planned next. Use bullet points."
                 ),
                 messages=[{"role": "user", "content": f"Summarize:\n\n{old_conversation}"}],
-                max_tokens=128000,
+                max_tokens=_compress_max,
             )
 
             summary_text = ""

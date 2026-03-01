@@ -26,6 +26,7 @@ import display
 from llm_client import LLMAgent
 from builtin_tools import BuiltinTools, BUILTIN_TOOLS
 from mcp_client import MCPManager
+from starlark_executor import extract_starlark_blocks as _extract_starlark
 from site_researcher import research_sites, get_reference_reports_summary
 from stats import TokenStats
 from skills_manager import SkillsManager
@@ -378,8 +379,67 @@ def get_codes_summary() -> str:
     return f"{len(files)} code example(s) available:\n" + "\n".join(files)
 
 
-def build_system_prompt(skills_summary: str, mcp_tool_names: list[str], db_configured: bool, references_summary: str = "", tool_signatures: str = "", codes_summary: str = "") -> str:
+def _is_small_context() -> bool:
+    """Check if we're running on a small context model."""
+    return config.CONTEXT_WINDOW > 0 and config.CONTEXT_WINDOW < 32_000
+
+
+def _build_compact_system_prompt(skills_summary: str, mcp_tool_names: list[str], db_configured: bool, references_summary: str = "", tool_signatures: str = "", codes_summary: str = "", memory_content: str = "") -> str:
+    """Build a compact system prompt for small context windows (< 32K tokens).
+
+    ~2K tokens instead of ~7K. Strips verbose docs, keeps essential instructions.
+    """
+    mcp_tools_str = ", ".join(mcp_tool_names) if mcp_tool_names else "None"
+
+    memory_section = ""
+    if memory_content:
+        memory_section = f"\n## OPERATOR MEMORY (ALWAYS follow)\n{memory_content}\n"
+
+    return f"""{config.SYSTEM_PROMPT}
+
+# ROLE
+Fully autonomous AI agent. Execute tasks from .temp/plan.md. Act, don't ask.
+LANGUAGE: ENGLISH only for all output.
+
+# ENVIRONMENT
+- Project: {config.PROJECT_PATH}
+- Scratchpad: .temp/
+- Plan: .temp/plan.md
+- Database: {"CONNECTED" if db_configured else "NOT CONFIGURED"}
+- MCP: {mcp_tools_str}
+
+# TOOL CALLING — STARLARK
+Write ONE ```starlark block per response. No text after code. Max 10 calls per block.
+{tool_signatures}
+
+Key: execute_shell(command), read_file(path), write_file(path,content), list_directory(path), search_files(pattern), web_search(query), web_fetch(url), rag_search(query), save_memory(text), delete_memory(index)
+Utilities: print(), send_message(text), output(value), set_var(name,value), get_var(name), get_result(ref_id), sleep(s)
+{memory_section}
+# WORKFLOW
+1. Read .temp/tasks.md — pick next [ ] task
+2. Execute it (write code, run commands)
+3. Quick verify — read back, run build ONCE
+4. Update tasks.md — move to Completed
+5. Use rag_search(query) to find relevant skills/code/files BEFORE writing code
+
+# RULES
+- Be autonomous. Use tools, don't describe.
+- NO repetition — check Completed section first.
+- Tasks from plan ONLY. Don't invent work.
+- If all tasks done + plan complete → send_message("All planned work complete") and STOP.
+- Operator messages (⚠️ CRITICAL) override everything.
+- NEVER use placeholder image URLs — use generate_image().
+- End each iteration with specific summary of what changed."""
+
+
+def build_system_prompt(skills_summary: str, mcp_tool_names: list[str], db_configured: bool, references_summary: str = "", tool_signatures: str = "", codes_summary: str = "", memory_content: str = "") -> str:
     """Build the detailed system prompt for the universal autonomous agent."""
+    if _is_small_context():
+        return _build_compact_system_prompt(
+            skills_summary, mcp_tool_names, db_configured,
+            references_summary, tool_signatures, codes_summary, memory_content,
+        )
+
     mcp_tools_str = ", ".join(mcp_tool_names) if mcp_tool_names else "None"
     db_status = "CONNECTED — use execute_sql for queries" if db_configured else "NOT CONFIGURED — set DATABASE_URL in .env to enable"
 
@@ -405,6 +465,22 @@ Code examples and templates are available for reference. Use `search_codes(query
 {codes_summary}
 
 IMPORTANT: ALWAYS search the code knowledge base BEFORE writing code. It may contain patterns, templates, and examples relevant to your task.
+"""
+
+    memory_section = ""
+    if memory_content:
+        memory_section = f"""
+# OPERATOR MEMORY (persistent instructions — ALWAYS follow these)
+
+These are permanent instructions saved by the operator. They survive restarts.
+You MUST follow ALL of these rules at all times. They override default behavior.
+
+{memory_content}
+
+To manage memory, the operator can ask you to:
+- Save new instructions: use `save_memory(text="...")`
+- Delete an instruction: use `delete_memory(index=N)` (1-based)
+- View all memory: read .temp/memory.md
 """
 
     return f"""{config.SYSTEM_PROMPT}
@@ -470,6 +546,9 @@ output("build_result", result)
 - `list_skills()`, `read_skill(name)`, `create_skill(name, content)` — knowledge files
 - `generate_image(prompt, filename)` — generate AI image and save to file (for icons, illustrations, backgrounds)
 - `search_codes(query)`, `read_code(path)` — search and read code examples from .temp/codes/ knowledge base
+- `rag_search(query)` — search across ALL project files, skills, and code examples at once. Use BEFORE writing code to find relevant context.
+- `save_memory(text)` — save a persistent instruction to memory (survives restarts). Use when operator says "запомни"/"remember"/"save to memory"
+- `delete_memory(index)` — delete a memory entry by its 1-based number
 - MCP tools: {mcp_tools_str}
 
 ## Built-in utility functions (always available, no tool call overhead):
@@ -520,6 +599,7 @@ Tool errors are returned as strings starting with "Error:". Check with: `if "Err
 ## Database: {db_status}
 {refs_section}
 {codes_section}
+{memory_section}
 # WORK PROCESS
 
 ## Task Tracking — .temp/tasks.md (YOUR task list, you own it)
@@ -545,10 +625,11 @@ Rules for tasks.md:
 
 ## Every Iteration:
 1. **Read tasks**: Open .temp/tasks.md — pick the next `[ ]` task
-2. **Execute the task**: Write code, create files, run commands. Focus on BUILDING, not checking.
-3. **Quick verify**: Read back key files you changed, ensure no syntax errors. Run build/start command ONCE to check it works.
-4. **Update tasks.md**: Move completed task to "Completed". Pick next task or generate from plan.md.
-5. **Summary**: List files changed and what was built.
+2. **Search context**: Use `rag_search(query)` to find relevant skills, code examples, and project files BEFORE writing code
+3. **Execute the task**: Write code, create files, run commands. Focus on BUILDING, not checking.
+4. **Quick verify**: Read back key files you changed, ensure no syntax errors. Run build/start command ONCE to check it works.
+5. **Update tasks.md**: Move completed task to "Completed". Pick next task or generate from plan.md.
+6. **Summary**: List files changed and what was built.
 
 ## ANTI-REPETITION RULE:
 - Before starting any task, READ .temp/tasks.md "Completed" section
@@ -729,6 +810,20 @@ def read_tasks_file() -> str:
     return ""
 
 
+def read_memory_file() -> str:
+    """Read .temp/memory.md persistent memory. Returns content or empty string."""
+    memory_path = os.path.join(config.TEMP_DIR, "memory.md")
+    if os.path.exists(memory_path):
+        try:
+            with open(memory_path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if content:
+                return content
+        except Exception:
+            pass
+    return ""
+
+
 def _get_upload_filenames() -> list[str]:
     """List image filenames in .temp/uploads/ (without loading content)."""
     uploads_dir = Path(config.TEMP_DIR) / "uploads"
@@ -765,6 +860,24 @@ def _extract_work_description(text: str) -> str:
 
 def build_continuation_message(plan_content: str) -> str:
     """Build the continuation message for subsequent iterations."""
+
+    if _is_small_context():
+        tasks_content = read_tasks_file()
+        tasks_preview = ""
+        if tasks_content:
+            lines = tasks_content.split("\n")
+            pending = [l.strip() for l in lines if l.strip().startswith("- [ ]")]
+            if pending:
+                tasks_preview = "Pending:\n" + "\n".join(pending[:5])
+                if len(pending) > 5:
+                    tasks_preview += f"\n(+{len(pending)-5} more)"
+            else:
+                tasks_preview = "No pending tasks. Check if plan is complete."
+        else:
+            tasks_preview = "No tasks.md — create it from plan.md."
+        return f"""Continue. {tasks_preview}
+Pick next task, execute, update tasks.md. If all done → send_message("All complete")."""
+
     tasks_content = read_tasks_file()
     tasks_section = ""
     if tasks_content:
@@ -798,12 +911,12 @@ If you need to review them, use `read_file` or `list_directory` on .temp/uploads
 {tasks_section}{uploads_section}
 Pick the next uncompleted task from tasks.md and execute it.
 After completing it, update tasks.md (move to Completed with result).
-If no tasks remain — generate new ones (search web, browse competitors, review code).
+If no tasks remain — re-read .temp/plan.md and generate new tasks for the next uncompleted phase.
 
 IMPORTANT:
 - Do NOT repeat work already in the "Completed" section
 - End with a DETAILED summary of what you did (files changed, what was built, test results)
-- NEVER say the project is finished — always find more to improve"""
+- If ALL tasks in tasks.md are completed AND the entire plan.md is done — use send_message() to report "All planned work complete", update tasks.md with a final summary, then STOP. Do NOT invent new work or improvements not in the plan."""
 
 
 def build_resume_message(plan_content: str) -> str:
@@ -849,7 +962,7 @@ IMPORTANT — RESUME INSTRUCTIONS:
 5. Continue working normally — pick the next uncompleted task
 
 End with a DETAILED summary of what you did (files changed, what was built, test results)
-- NEVER say the project is finished — always find more to improve"""
+- If ALL tasks are completed AND the entire plan.md is done — use send_message() to report "All planned work complete" and STOP. Do NOT invent new work."""
 
 
 def parse_pending_tasks() -> list[str]:
@@ -1251,7 +1364,7 @@ async def run_agent():
     if codes_summary:
         display.show_info(f"Code knowledge base: {codes_summary.split(chr(10))[0]}")
     tool_sigs = agent.get_starlark_tool_signatures()
-    system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary, tool_signatures=tool_sigs, codes_summary=codes_summary)
+    system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary, tool_signatures=tool_sigs, codes_summary=codes_summary, memory_content=read_memory_file())
 
     plan_content = read_plan_file()
     file_listing = get_project_file_listing(config.PROJECT_PATH)
@@ -1263,8 +1376,36 @@ async def run_agent():
     iteration = 1
     shutdown_mode = False
     _last_sync_summary = ""
-    _outer_response_hashes: list[str] = []  # anti-repetition: track response fingerprints
-    _outer_repeat_warned = False  # True if we already injected a "you are stuck" message
+    _outer_response_hashes: list[str] = []
+    _outer_repeat_warned = False
+    _cached_system_prompt = system_prompt
+    _cached_prompt_mtime: dict[str, float] = {}
+
+    def _get_dir_mtime(path: str) -> float:
+        """Get max mtime of files in a directory (non-recursive, shallow)."""
+        try:
+            if os.path.isdir(path):
+                return max((os.path.getmtime(os.path.join(path, f)) for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))), default=0)
+        except Exception:
+            pass
+        return 0
+
+    def _rebuild_system_prompt_if_needed() -> str:
+        nonlocal _cached_system_prompt, _cached_prompt_mtime
+        checks = {
+            "skills": _get_dir_mtime(config.SKILLS_DIR),
+            "codes": _get_dir_mtime(config.CODES_DIR),
+            "memory": os.path.getmtime(os.path.join(config.TEMP_DIR, "memory.md")) if os.path.exists(os.path.join(config.TEMP_DIR, "memory.md")) else 0,
+        }
+        if checks == _cached_prompt_mtime and _cached_system_prompt:
+            return _cached_system_prompt
+        _s = skills.get_skills_summary()
+        _m = [t["name"] for t in mcp.get_all_tools()]
+        _t = agent.get_starlark_tool_signatures()
+        _c = get_codes_summary()
+        _cached_system_prompt = build_system_prompt(_s, _m, bool(config.DATABASE_URL), references_summary, tool_signatures=_t, codes_summary=_c, memory_content=read_memory_file())
+        _cached_prompt_mtime = checks
+        return _cached_system_prompt
 
     _original_sigint = signal.getsignal(signal.SIGINT)
     def _sigint_handler(signum, frame):
@@ -1305,11 +1446,7 @@ async def run_agent():
 
                 plan_content = read_plan_file()
 
-                skills_summary = skills.get_skills_summary()
-                mcp_tool_names = [t["name"] for t in mcp.get_all_tools()]
-                tool_sigs = agent.get_starlark_tool_signatures()
-                codes_summary = get_codes_summary()
-                system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary, tool_signatures=tool_sigs, codes_summary=codes_summary)
+                system_prompt = _rebuild_system_prompt_if_needed()
 
                 assigned_tasks = pending_tasks[:n_agents]
                 display.show_info(f"Assigning {n_agents} tasks to {n_agents} agents:")
@@ -1350,6 +1487,26 @@ async def run_agent():
 
                 for i in range(n_agents):
                     agents[i].save_history(config.get_conversation_file(i))
+
+                _parallel_combined = "|".join(text[:500] for _, text in agent_results if text).lower()
+                _parallel_fp = hashlib.md5(_parallel_combined.encode()).hexdigest()
+                _outer_response_hashes.append(_parallel_fp)
+                if len(_outer_response_hashes) > 6:
+                    _outer_response_hashes.pop(0)
+                if len(_outer_response_hashes) >= 3 and len(set(_outer_response_hashes[-3:])) == 1:
+                    if not _outer_repeat_warned:
+                        _outer_repeat_warned = True
+                        display.show_warning("🔁 Parallel agents repeating same output 3x in a row")
+                        telegram.send("⚠️ <b>Parallel repetition detected</b> — agents stuck")
+                    elif len(_outer_response_hashes) >= 5 and len(set(_outer_response_hashes[-5:])) == 1:
+                        display.show_warning("🔁 Parallel agents stuck for 5 iterations — auto-pausing")
+                        telegram.send("🛑 <b>Agents auto-paused</b> — stuck in parallel loop.\nSend /fix or /resume.")
+                        _pause_requested = True
+                        _pause_event.clear()
+                        _outer_response_hashes.clear()
+                        _outer_repeat_warned = False
+                elif len(_outer_response_hashes) >= 3:
+                    _outer_repeat_warned = False
 
                 tg_lines = [f"<b>#{iteration}</b> (x{n_agents})\n"]
                 for aid, text in agent_results:
@@ -1403,7 +1560,8 @@ MANDATORY ACTIONS:
 2. Do NOT skip it, do NOT postpone it, do NOT "note it for later"
 3. Use `send_message()` to report the result back to the operator via Telegram
 4. Only AFTER completing this request, resume your normal tasks
-5. If the request contradicts the plan — THE REQUEST WINS. The operator's word is law."""
+5. If the request contradicts the plan — THE REQUEST WINS. The operator's word is law.
+6. If the operator says "запомни", "remember", "сохрани в памяти", "save to memory", "always", "никогда", "never" — you MUST call `save_memory(text="...")` to persist the instruction permanently. Just acknowledging it is NOT enough — it MUST be saved to memory."""
 
                     if isinstance(pending, list):
                         text_preview = " ".join(b.get("text", "") for b in pending if b.get("type") == "text")[:100]
@@ -1424,26 +1582,30 @@ MANDATORY ACTIONS:
                 else:
                     plan_content = read_plan_file()
                     user_msg = build_continuation_message(plan_content)
-                    # Inject anti-repetition warning if agent is stuck
-                    if _outer_repeat_warned:
+                    if _outer_repeat_warned or getattr(agent, '_last_turn_repeated', False):
                         stuck_warning = (
-                            "\n\n⚠️⚠️⚠️ REPETITION ALERT: You have produced the SAME response for 3 iterations in a row. "
+                            "\n\n⚠️⚠️⚠️ REPETITION ALERT: You have been repeating the SAME response. "
                             "You are STUCK in a loop. You MUST change your approach NOW:\n"
                             "1. Do NOT repeat the same starlark/tool calls you just did\n"
-                            "2. Read .temp/tasks.md — if the current task is failing, SKIP it and move to the next one\n"
+                            "2. Read .temp/tasks.md — if the current task is failing, SKIP it (mark as failed) and move to the next one\n"
                             "3. If you keep failing at the same thing, write the problem to .temp/errors.log and move on\n"
                             "4. Try a completely different strategy to accomplish the task\n"
+                            "5. If ALL tasks in tasks.md are done AND plan.md is fully complete — "
+                            "use send_message('All planned work is complete.') to notify the operator, then STOP producing starlark blocks. "
+                            "Just respond with a short text summary. Do NOT keep trying to find more work.\n"
                         )
                         user_msg += stuck_warning
 
                 try:
-                    skills_summary = skills.get_skills_summary()
-                    mcp_tool_names = [t["name"] for t in mcp.get_all_tools()]
-                    tool_sigs = agent.get_starlark_tool_signatures()
-                    codes_summary = get_codes_summary()
-                    system_prompt = build_system_prompt(skills_summary, mcp_tool_names, bool(config.DATABASE_URL), references_summary, tool_signatures=tool_sigs, codes_summary=codes_summary)
+                    system_prompt = _rebuild_system_prompt_if_needed()
 
                     response_text = await agent.run_turn(user_msg, system_prompt, check_interrupt=_check_keypress, check_pause=_wait_if_paused)
+
+                    if getattr(agent, '_last_turn_repeated', False):
+                        if not _outer_repeat_warned:
+                            _outer_repeat_warned = True
+                            display.show_warning("🔁 Inner loop flagged repetition — escalating to outer loop")
+                            telegram.send("⚠️ <b>Agent stuck</b> — inner loop repetition detected, injecting correction")
                 except Exception as e:
                     error_str = str(e)
                     display.show_error(f"Agent error: {e}")
@@ -1465,26 +1627,36 @@ MANDATORY ACTIONS:
 
                 agent.save_history(config.CONVERSATION_FILE)
 
-                # --- Outer-loop anti-repetition ---
                 if response_text and not pending and not shutdown_mode:
-                    _resp_fingerprint = hashlib.md5(response_text[:1000].encode()).hexdigest()
+                    _starlark_in_resp = _extract_starlark(response_text)
+                    if _starlark_in_resp:
+                        _fp_source = "".join(_starlark_in_resp).strip()
+                    else:
+                        _fp_source = response_text[:2000].strip().lower()
+                    _resp_fingerprint = hashlib.md5(_fp_source.encode()).hexdigest()
                     _outer_response_hashes.append(_resp_fingerprint)
-                    # Keep only the last 5 hashes to limit memory
-                    if len(_outer_response_hashes) > 5:
+                    if len(_outer_response_hashes) > 6:
                         _outer_response_hashes.pop(0)
-                    # Check if last 3 are identical
                     if len(_outer_response_hashes) >= 3:
                         _last3 = _outer_response_hashes[-3:]
-                        if len(set(_last3)) == 1 and not _outer_repeat_warned:
-                            _outer_repeat_warned = True
-                            display.show_warning("🔁 Outer loop repetition: agent produced the same response 3 iterations in a row")
-                            telegram.send("⚠️ <b>Repetition detected</b> — agent stuck, injecting correction prompt")
+                        if len(set(_last3)) == 1:
+                            if not _outer_repeat_warned:
+                                _outer_repeat_warned = True
+                                display.show_warning("🔁 Outer loop repetition: agent produced the same response 3 iterations in a row")
+                                telegram.send("⚠️ <b>Repetition detected</b> — agent stuck, injecting correction prompt")
+                            elif len(_outer_response_hashes) >= 5 and len(set(_outer_response_hashes[-5:])) == 1:
+                                display.show_warning("🔁 Agent stuck for 5 iterations — auto-pausing until new /fix message arrives")
+                                telegram.send("🛑 <b>Agent auto-paused</b> — stuck in loop for 5 iterations.\nSend /fix with new instructions or /resume to continue.")
+                                _pause_requested = True
+                                _pause_event.clear()
+                                _outer_response_hashes.clear()
+                                _outer_repeat_warned = False
                         else:
                             _outer_repeat_warned = False
-                    elif _outer_repeat_warned:
-                        _outer_repeat_warned = False
+                    else:
+                        if _outer_repeat_warned:
+                            _outer_repeat_warned = False
                 else:
-                    # Reset on fix/shutdown since context changes significantly
                     if pending:
                         _outer_response_hashes.clear()
                         _outer_repeat_warned = False

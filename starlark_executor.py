@@ -77,6 +77,18 @@ _RESULT_CACHE_THRESHOLD = 10_000
 _RESULT_CACHE_PREVIEW = 2_000
 
 
+def _get_result_preview_limit() -> int:
+    """Adaptive preview limit based on context window."""
+    try:
+        import config as _cfg
+        cw = getattr(_cfg, 'CONTEXT_WINDOW', 0)
+        if cw > 0:
+            return max(200, min(cw // 10, _RESULT_CACHE_PREVIEW))
+    except Exception:
+        pass
+    return _RESULT_CACHE_PREVIEW
+
+
 def extract_starlark_blocks(text: str) -> list[str]:
     """Extract ```starlark code blocks from LLM text response.
 
@@ -733,7 +745,7 @@ class StarlarkExecutor:
         if isinstance(result_str, str) and len(result_str) > _RESULT_CACHE_THRESHOLD:
             ref_id = f"ref_{hashlib.md5(f'{tool_name}_{time.time()}'.encode()).hexdigest()[:8]}"
             self._result_cache[ref_id] = result_str
-            truncated = result_str[:_RESULT_CACHE_PREVIEW]
+            truncated = result_str[:_get_result_preview_limit()]
             result_str = f"{truncated}\n\n... [truncated {len(result_str):,} chars, use get_result(\"{ref_id}\") to read more]"
 
         self._call_log.append({
@@ -936,8 +948,9 @@ def format_starlark_results(result: dict) -> str:
             name = entry.get("name")
             value = entry.get("value")
             value_str = str(value)
-            if len(value_str) > 2000:
-                value_str = value_str[:2000] + "\n... (truncated)"
+            _limit = _get_result_preview_limit()
+            if len(value_str) > _limit:
+                value_str = value_str[:_limit] + "\n... (truncated)"
             if name:
                 parts.append(f"### {name}\n```\n{value_str}\n```\n")
             else:
