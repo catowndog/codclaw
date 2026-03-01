@@ -475,6 +475,15 @@ if [[ "${DO_ENV:-true}" == "true" ]]; then
     fi
 
     echo ""
+    echo -e "  ${DIM}Max tokens — maximum number of tokens in LLM response.${NC}"
+    echo -e "  ${DIM}Higher = longer responses but more expensive. 0 = model default.${NC}"
+    echo -e "  ${DIM}Examples: 16000 (short), 64000 (medium), 128000 (large), 256000 (max)${NC}"
+    ask "Max tokens [128000]: "
+    read -r INPUT_MAX_TOKENS
+    MAX_TOKENS="${INPUT_MAX_TOKENS:-128000}"
+    ok "Max tokens: ${MAX_TOKENS}"
+
+    echo ""
     echo -e "  ${DIM}Parallel agents (how many LLM agents work simultaneously):${NC}"
     echo -e "    ${WHITE}1${NC}) x1 — single agent ${DIM}(default)${NC}"
     echo -e "    ${WHITE}2${NC}) x2 — 2 agents in parallel"
@@ -554,7 +563,7 @@ SYSTEM_PROMPT=You are an autonomous agent. Follow the plan in .temp/plan.md
 
 PROJECT_PATH=${PROJECT_PATH}
 CONTEXT_WINDOW=${CONTEXT_WINDOW}
-MAX_TOKENS=256000
+MAX_TOKENS=${MAX_TOKENS}
 SHOW_THINKING=true
 EFFORT=high
 DELAY=2
@@ -648,6 +657,9 @@ echo -e "  ${WHITE}Python:${NC}        $(python${PYTHON_VER} --version 2>&1)"
 echo -e "  ${WHITE}Node.js:${NC}       $(node --version 2>&1)"
 echo -e "  ${WHITE}Chrome:${NC}        $(google-chrome --version 2>&1 | head -1)"
 echo -e "  ${WHITE}Service:${NC}       ${SERVICE_NAME}.service (enabled)"
+echo ""
+echo -e "  ${YELLOW}⚠${NC}  ${DIM}First launch may take a few minutes — the agent downloads MCP${NC}"
+echo -e "     ${DIM}dependencies and initializes the browser environment.${NC}"
 echo ""
 echo -e "  ${BOLD}Quick start:${NC}"
 echo -e "    ${CYAN}sudo systemctl start ${SERVICE_NAME}${NC}     — start agent"
