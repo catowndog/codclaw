@@ -448,6 +448,19 @@ if [[ "${DO_ENV:-true}" == "true" ]]; then
     mkdir -p "$PROJECT_PATH/.temp" 2>/dev/null || true
 
     echo ""
+    echo -e "  ${DIM}Context window — model's max context size in tokens.${NC}"
+    echo -e "  ${DIM}0 = auto-detect from model name. Set manually for proxied/custom models.${NC}"
+    echo -e "  ${DIM}Examples: 12000 (cheap), 32000 (medium), 128000 (large), 0 (auto)${NC}"
+    ask "Context window [0 = auto]: "
+    read -r INPUT_CONTEXT_WINDOW
+    CONTEXT_WINDOW="${INPUT_CONTEXT_WINDOW:-0}"
+    if [[ "$CONTEXT_WINDOW" == "0" ]]; then
+        ok "Context window: auto-detect from model"
+    else
+        ok "Context window: ${CONTEXT_WINDOW} tokens"
+    fi
+
+    echo ""
     echo -e "  ${DIM}Parallel agents (how many LLM agents work simultaneously):${NC}"
     echo -e "    ${WHITE}1${NC}) x1 — single agent ${DIM}(default)${NC}"
     echo -e "    ${WHITE}2${NC}) x2 — 2 agents in parallel"
@@ -526,6 +539,7 @@ OPENAI_IMAGE_MODEL=${OPENAI_IMAGE_MODEL:-}
 SYSTEM_PROMPT=You are an autonomous agent. Follow the plan in .temp/plan.md
 
 PROJECT_PATH=${PROJECT_PATH}
+CONTEXT_WINDOW=${CONTEXT_WINDOW}
 MAX_TOKENS=256000
 SHOW_THINKING=true
 EFFORT=high
