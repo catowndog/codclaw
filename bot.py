@@ -1347,7 +1347,7 @@ async def run_agent():
                     full_msgs = json.load(_f)
                 if len(full_msgs) > compressed_count + 5:
                     display.show_info(f"Restored full history ({len(full_msgs)} msgs instead of {compressed_count} compressed)")
-                    a.messages = full_msgs
+                    a.messages = a._fix_orphaned_tool_pairs(full_msgs)
             except Exception:
                 pass
 
