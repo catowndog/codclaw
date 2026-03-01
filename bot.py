@@ -872,11 +872,11 @@ def build_continuation_message(plan_content: str) -> str:
                 if len(pending) > 5:
                     tasks_preview += f"\n(+{len(pending)-5} more)"
             else:
-                tasks_preview = "No pending tasks. Check if plan is complete."
+                tasks_preview = "No pending tasks. Re-read plan.md → generate new tasks for next phase or improvements."
         else:
             tasks_preview = "No tasks.md — create it from plan.md."
         return f"""Continue. {tasks_preview}
-Pick next task, execute, update tasks.md. If all done → send_message("All complete")."""
+Pick next task, execute, update tasks.md. If all done → generate new tasks from plan or review for improvements."""
 
     tasks_content = read_tasks_file()
     tasks_section = ""
@@ -916,7 +916,7 @@ If no tasks remain — re-read .temp/plan.md and generate new tasks for the next
 IMPORTANT:
 - Do NOT repeat work already in the "Completed" section
 - End with a DETAILED summary of what you did (files changed, what was built, test results)
-- If ALL tasks in tasks.md are completed AND the entire plan.md is done — use send_message() to report "All planned work complete", update tasks.md with a final summary, then STOP. Do NOT invent new work or improvements not in the plan."""
+- If ALL tasks in tasks.md are completed — re-read plan.md, find uncompleted phases, and generate NEW tasks. If the entire plan is done — review the project for quality, bugs, edge cases, performance, and generate improvement tasks. There is always more to do."""
 
 
 def build_resume_message(plan_content: str) -> str:
@@ -1375,6 +1375,7 @@ async def run_agent():
 
     iteration = 1
     shutdown_mode = False
+    response_text = ""
     _last_sync_summary = ""
     _outer_response_hashes: list[str] = []
     _outer_repeat_warned = False
@@ -1581,7 +1582,38 @@ MANDATORY ACTIONS:
                     telegram.send("♻️ <b>Session resumed</b> — history restored ✓")
                 else:
                     plan_content = read_plan_file()
-                    user_msg = build_continuation_message(plan_content)
+
+                    # --- All tasks done? Tell agent to generate new ones from plan ---
+                    tasks_content = read_tasks_file()
+                    _has_pending = False
+                    if tasks_content:
+                        for _tl in tasks_content.split("\n"):
+                            _tl_stripped = _tl.strip()
+                            if _tl_stripped.startswith("- [ ]") or _tl_stripped.startswith("- [→]") or _tl_stripped.startswith("- [>]"):
+                                _has_pending = True
+                                break
+
+                    if not _has_pending and tasks_content and iteration > 2:
+                        display.show_info("📋 All current tasks completed — requesting next batch from plan")
+                        user_msg = f"""All current tasks in tasks.md are completed. Good work!
+
+Now re-read the plan and generate the NEXT batch of tasks:
+
+## Plan (.temp/plan.md):
+{plan_content}
+
+## Completed Tasks (.temp/tasks.md):
+{tasks_content}
+
+INSTRUCTIONS:
+1. Compare plan.md with completed tasks — find phases/features that are NOT yet implemented
+2. Generate 5-10 new tasks for the next uncompleted phase and write them to tasks.md (append under new section, keep completed tasks history)
+3. If the ENTIRE plan is truly 100% complete — review the project for bugs, quality issues, missing edge cases, and generate improvement tasks
+4. Start executing the first new task immediately
+5. Do NOT repeat tasks that are already in the Completed section
+6. Do NOT send "all complete" — there is always more to improve"""
+                    else:
+                        user_msg = build_continuation_message(plan_content)
                     if _outer_repeat_warned or getattr(agent, '_last_turn_repeated', False):
                         stuck_warning = (
                             "\n\n⚠️⚠️⚠️ REPETITION ALERT: You have been repeating the SAME response. "
@@ -1590,9 +1622,9 @@ MANDATORY ACTIONS:
                             "2. Read .temp/tasks.md — if the current task is failing, SKIP it (mark as failed) and move to the next one\n"
                             "3. If you keep failing at the same thing, write the problem to .temp/errors.log and move on\n"
                             "4. Try a completely different strategy to accomplish the task\n"
-                            "5. If ALL tasks in tasks.md are done AND plan.md is fully complete — "
-                            "use send_message('All planned work is complete.') to notify the operator, then STOP producing starlark blocks. "
-                            "Just respond with a short text summary. Do NOT keep trying to find more work.\n"
+                            "5. If ALL tasks are done — re-read plan.md, find uncompleted phases, "
+                            "generate NEW tasks and start executing them. If the plan is fully done — "
+                            "review the project for quality, bugs, and improvements, then create tasks for those.\n"
                         )
                         user_msg += stuck_warning
 
