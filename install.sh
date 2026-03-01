@@ -396,7 +396,7 @@ if [[ "${DO_ENV:-true}" == "true" ]]; then
     echo ""
     echo -e "  ${DIM}Image generation provider (optional — press Enter to skip/disable):${NC}"
     echo -e "    ${WHITE}1${NC}) OpenAI ${DIM}(gpt-5-image via OpenAI-compatible API)${NC}"
-    echo -e "    ${WHITE}2${NC}) Gemini ${DIM}(gemini-2.0-flash-preview-image-generation)${NC}"
+    echo -e "    ${WHITE}2${NC}) Gemini ${DIM}(gemini-3-pro-image-preview)${NC}"
     echo -e "    ${WHITE}3${NC}) None ${DIM}(disable image generation)${NC}"
     ask "Choose [3]: "
     read -r INPUT_IMG_PROVIDER
@@ -406,6 +406,20 @@ if [[ "${DO_ENV:-true}" == "true" ]]; then
             OPENAI_IMAGE_MODEL="gpt-5-image"
             GEMINI_API_KEY=""
             GEMINI_IMAGE_MODEL=""
+            if [[ "$LLM_API_PROVIDER" != "openai" ]]; then
+                echo -e "  ${DIM}OpenAI images require an API key (separate from your LLM provider):${NC}"
+                ask "OpenAI API Key for images: "
+                read -r IMAGE_OPENAI_API_KEY
+                while [[ -z "$IMAGE_OPENAI_API_KEY" ]]; do
+                    err "OpenAI API Key is required for image generation!"
+                    ask "OpenAI API Key for images: "
+                    read -r IMAGE_OPENAI_API_KEY
+                done
+                IMAGE_OPENAI_BASE_URL="https://api.openai.com/v1"
+                ask "OpenAI Base URL for images [${IMAGE_OPENAI_BASE_URL}]: "
+                read -r INPUT_IMG_BASE_URL
+                IMAGE_OPENAI_BASE_URL="${INPUT_IMG_BASE_URL:-$IMAGE_OPENAI_BASE_URL}"
+            fi
             ask "OpenAI image model [${OPENAI_IMAGE_MODEL}]: "
             read -r INPUT_OAI_IMG_MODEL
             OPENAI_IMAGE_MODEL="${INPUT_OAI_IMG_MODEL:-$OPENAI_IMAGE_MODEL}"
@@ -421,7 +435,7 @@ if [[ "${DO_ENV:-true}" == "true" ]]; then
                 ask "Gemini API Key: "
                 read -r GEMINI_API_KEY
             done
-            GEMINI_IMAGE_MODEL="gemini-2.0-flash-preview-image-generation"
+            GEMINI_IMAGE_MODEL="gemini-3-pro-image-preview"
             ask "Gemini image model [${GEMINI_IMAGE_MODEL}]: "
             read -r INPUT_GEMINI_MODEL
             GEMINI_IMAGE_MODEL="${INPUT_GEMINI_MODEL:-$GEMINI_IMAGE_MODEL}"
@@ -531,8 +545,8 @@ ANTHROPIC_API_KEY=${LLM_API_PROVIDER:+$( [[ "$LLM_API_PROVIDER" == "anthropic" ]
 ANTHROPIC_BASE_URL=${LLM_API_PROVIDER:+$( [[ "$LLM_API_PROVIDER" == "anthropic" ]] && echo "$API_BASE_URL" || echo "https://api.anthropic.com" )}
 ANTHROPIC_MODEL=${LLM_API_PROVIDER:+$( [[ "$LLM_API_PROVIDER" == "anthropic" ]] && echo "$API_MODEL" || echo "claude-sonnet-4-20250514" )}
 
-OPENAI_API_KEY=${LLM_API_PROVIDER:+$( [[ "$LLM_API_PROVIDER" == "openai" ]] && echo "$API_KEY" || echo "" )}
-OPENAI_BASE_URL=${LLM_API_PROVIDER:+$( [[ "$LLM_API_PROVIDER" == "openai" ]] && echo "$API_BASE_URL" || echo "" )}
+OPENAI_API_KEY=$( if [[ "$LLM_API_PROVIDER" == "openai" ]]; then echo "$API_KEY"; elif [[ -n "${IMAGE_OPENAI_API_KEY:-}" ]]; then echo "$IMAGE_OPENAI_API_KEY"; fi )
+OPENAI_BASE_URL=$( if [[ "$LLM_API_PROVIDER" == "openai" ]]; then echo "$API_BASE_URL"; elif [[ -n "${IMAGE_OPENAI_BASE_URL:-}" ]]; then echo "$IMAGE_OPENAI_BASE_URL"; fi )
 OPENAI_MODEL=${LLM_API_PROVIDER:+$( [[ "$LLM_API_PROVIDER" == "openai" ]] && echo "$API_MODEL" || echo "" )}
 OPENAI_IMAGE_MODEL=${OPENAI_IMAGE_MODEL:-}
 
